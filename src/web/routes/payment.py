@@ -13,7 +13,7 @@ from urllib.parse import urlparse, urlunparse
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import joinedload
 from curl_cffi import requests as cffi_requests
 
@@ -2145,6 +2145,10 @@ class SaveSessionTokenRequest(BaseModel):
     merge_cookie: bool = True
 
 
+class BindCardFailStatsRequest(BaseModel):
+    account_ids: List[int] = []
+
+
 # ============== 支付链接生成 ==============
 
 
@@ -2542,6 +2546,40 @@ def list_bind_card_tasks(
             "total": total,
             "tasks": [_serialize_bind_card_task(task) for task in tasks],
         }
+
+
+@router.post("/bind-card/tasks/fail-stats")
+def get_bind_card_task_fail_stats(request: BindCardFailStatsRequest):
+    """按账号聚合绑卡失败次数，供支付页排序使用。"""
+    account_ids = sorted({int(account_id) for account_id in request.account_ids if int(account_id) > 0})
+    if not account_ids:
+        return {"success": True, "stats": []}
+
+    with get_db() as db:
+        rows = (
+            db.query(
+                BindCardTask.account_id.label("account_id"),
+                func.count(BindCardTask.id).label("fail_count"),
+            )
+            .filter(BindCardTask.account_id.in_(account_ids))
+            .filter(BindCardTask.status == "failed")
+            .group_by(BindCardTask.account_id)
+            .all()
+        )
+        fail_map = {
+            int(getattr(row, "account_id")): int(getattr(row, "fail_count") or 0)
+            for row in rows
+            if getattr(row, "account_id", None) is not None
+        }
+
+    stats = [
+        {
+            "account_id": account_id,
+            "fail_count": fail_map.get(account_id, 0),
+        }
+        for account_id in account_ids
+    ]
+    return {"success": True, "stats": stats}
 
 
 @router.post("/bind-card/tasks/{task_id}/open")
