@@ -15,7 +15,7 @@ except ImportError:
     import sys
     sys.exit(1)
 
-from .sentinel_token import build_sentinel_token
+from ..openai.sentinel_browser import fetch_browser_sentinel_artifacts
 from .utils import (
     FlowState,
     build_browser_headers,
@@ -181,6 +181,29 @@ class ChatGPTClient:
             "sec-ch-ua-platform-version": f'"{random.randint(10, 15)}.0.0"',
         })
         seed_oai_device_cookie(self.session, self.device_id)
+
+    def _browser_sentinel_headless(self) -> bool:
+        return self.browser_mode != "headed"
+
+    def _fetch_browser_sentinel_artifacts(
+        self,
+        *,
+        flow: str,
+        page_url: str,
+        include_session_observer: bool = False,
+        include_passkey_capabilities: bool = False,
+    ):
+        return fetch_browser_sentinel_artifacts(
+            flow=flow,
+            device_id=self.device_id,
+            page_url=page_url,
+            proxy=self.proxy,
+            user_agent=self.ua,
+            accept_language=self.accept_language,
+            include_session_observer=include_session_observer,
+            include_passkey_capabilities=include_passkey_capabilities,
+            headless=self._browser_sentinel_headless(),
+        )
 
     def _state_from_url(self, url, method="GET"):
         state = extract_flow_state(
@@ -552,6 +575,11 @@ class ChatGPTClient:
         """
         self._log(f"注册用户: {email}")
         url = f"{self.AUTH}/api/accounts/user/register"
+        sentinel = self._fetch_browser_sentinel_artifacts(
+            flow="username_password_create",
+            page_url=f"{self.AUTH}/create-account/password",
+            include_passkey_capabilities=True,
+        )
         
         headers = self._headers(
             url,
@@ -560,6 +588,11 @@ class ChatGPTClient:
             origin=self.AUTH,
             content_type="application/json",
             fetch_site="same-origin",
+            extra_headers={
+                "oai-device-id": self.device_id,
+                "OpenAI-Sentinel-Token": sentinel.token,
+                "ext-passkey-client-capabilities": sentinel.passkey_capabilities or "{}",
+            },
         )
         headers.update(generate_datadog_trace())
         
@@ -676,19 +709,11 @@ class ChatGPTClient:
         name = f"{first_name} {last_name}"
         self._log(f"完成账号创建: {name}")
         url = f"{self.AUTH}/api/accounts/create_account"
-
-        sentinel_token = build_sentinel_token(
-            self.session,
-            self.device_id,
-            flow="authorize_continue",
-            user_agent=self.ua,
-            sec_ch_ua=self.sec_ch_ua,
-            impersonate=self.impersonate,
+        sentinel = self._fetch_browser_sentinel_artifacts(
+            flow="oauth_create_account",
+            page_url=f"{self.AUTH}/about-you",
+            include_session_observer=True,
         )
-        if sentinel_token:
-            self._log("create_account: 已生成 sentinel token")
-        else:
-            self._log("create_account: 未生成 sentinel token，降级继续请求")
         
         headers = self._headers(
             url,
@@ -699,10 +724,11 @@ class ChatGPTClient:
             fetch_site="same-origin",
             extra_headers={
                 "oai-device-id": self.device_id,
+                "OpenAI-Sentinel-Token": sentinel.token,
             },
         )
-        if sentinel_token:
-            headers["openai-sentinel-token"] = sentinel_token
+        if sentinel.session_observer_token:
+            headers["OpenAI-Sentinel-SO-Token"] = sentinel.session_observer_token
         headers.update(generate_datadog_trace())
         
         payload = {
