@@ -187,6 +187,37 @@ def test_check_sentinel_sends_non_empty_pow(monkeypatch):
     assert body["p"] == "gAAAAACpow-token"
 
 
+def test_register_password_sends_device_and_sentinel_headers(monkeypatch):
+    session = QueueSession([
+        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
+    ])
+
+    engine = RegistrationEngine.__new__(RegistrationEngine)
+    engine.session = session
+    engine.email = "tester@example.com"
+    engine.password = None
+    engine._last_register_password_error = None
+    engine._log = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(engine, "_generate_password", lambda length=12: "Aa1!fixedPwd")
+
+    success, password = RegistrationEngine._register_password(
+        engine,
+        did="did-123",
+        sen_token="sentinel-token",
+    )
+
+    assert success is True
+    assert password == "Aa1!fixedPwd"
+    call = session.calls[0]
+    headers = call["kwargs"]["headers"]
+    assert headers["oai-device-id"] == "did-123"
+    assert headers["openai-sentinel-token"] == (
+        '{"p":"","t":"","c":"sentinel-token","id":"did-123","flow":"authorize_continue"}'
+    )
+    body = json.loads(call["kwargs"]["data"])
+    assert body == {"password": "Aa1!fixedPwd", "username": "tester@example.com"}
+
+
 def test_run_registers_then_relogs_to_fetch_token():
     session_one = QueueSession([
         ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
