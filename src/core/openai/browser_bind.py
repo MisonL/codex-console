@@ -322,6 +322,51 @@ def _find_chrome_binary() -> str:
     return ""
 
 
+def wait_for_cdp_ready(cdp_url: str, chrome_proc, timeout_seconds: int) -> Tuple[bool, str]:
+    """Wait until Chrome exposes CDP, or stderr confirms DevTools is listening."""
+    deadline = time.time() + max(int(timeout_seconds), 5)
+    stderr_buffer: List[str] = []
+    stderr_stream = getattr(chrome_proc, "stderr", None)
+    if stderr_stream is not None:
+        try:
+            os.set_blocking(stderr_stream.fileno(), False)
+        except Exception:
+            pass
+
+    while time.time() < deadline:
+        if stderr_stream is not None:
+            try:
+                chunk = stderr_stream.read()
+            except Exception:
+                chunk = ""
+            if chunk:
+                text = str(chunk)
+                stderr_buffer.append(text)
+                if "DevTools listening on" in text:
+                    return True, "".join(stderr_buffer)[-4000:]
+
+        try:
+            with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=1.5) as resp:
+                data = json.loads(resp.read() or b"{}")
+                if data.get("Browser"):
+                    return True, "".join(stderr_buffer)[-4000:]
+        except Exception:
+            pass
+
+        if chrome_proc.poll() is not None:
+            break
+        time.sleep(0.5)
+
+    if stderr_stream is not None:
+        try:
+            chunk = stderr_stream.read()
+        except Exception:
+            chunk = ""
+        if chunk:
+            stderr_buffer.append(str(chunk))
+    return False, "".join(stderr_buffer)[-4000:]
+
+
 def _simulate_human_behavior(page) -> None:
     try:
         for _ in range(random.randint(3, 6)):
@@ -517,20 +562,13 @@ def _auto_bind_with_cdp_checkout(
         chrome_proc = subprocess.Popen(
             chrome_args,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
         )
 
-        cdp_ready = False
-        for _ in range(22):
-            try:
-                with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=2) as resp:
-                    data = json.loads(resp.read() or b"{}")
-                    if data.get("Browser"):
-                        cdp_ready = True
-                        break
-            except Exception:
-                time.sleep(0.5)
+        cdp_ready, cdp_stderr = wait_for_cdp_ready(cdp_url, chrome_proc, timeout_seconds=22)
         if not cdp_ready:
+            logger.warning("CDP ready check failed: %s", cdp_stderr or "no chrome stderr output")
             return {
                 "success": False,
                 "need_user_action": False,

@@ -9,11 +9,10 @@ import shutil
 import subprocess
 import tempfile
 import time
-import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
-from .browser_bind import _find_chrome_binary, _wait_for_cloudflare
+from .browser_bind import _find_chrome_binary, _wait_for_cloudflare, wait_for_cdp_ready
 
 
 logger = logging.getLogger(__name__)
@@ -52,19 +51,6 @@ def _build_auth_cookie_items(device_id: str) -> list[dict]:
             "sameSite": "Lax",
         }
     ]
-
-
-def _wait_for_cdp(cdp_url: str, timeout_seconds: int) -> bool:
-    deadline = time.time() + max(5, int(timeout_seconds))
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(f"{cdp_url}/json/version", timeout=2) as response:
-                payload = json.loads(response.read() or b"{}")
-                if payload.get("Browser"):
-                    return True
-        except Exception:
-            time.sleep(0.5)
-    return False
 
 
 def _chrome_args(
@@ -227,9 +213,13 @@ def fetch_browser_sentinel_artifacts(
         chrome_proc = subprocess.Popen(
             _chrome_args(chrome_binary, cdp_port, user_data_dir, proxy, headless),
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-        if not _wait_for_cdp(cdp_url, timeout_seconds=min(timeout_seconds, 20)):
+        cdp_ready, cdp_stderr = wait_for_cdp_ready(cdp_url, chrome_proc, timeout_seconds=min(timeout_seconds, 20))
+        if not cdp_ready:
+            if cdp_stderr:
+                logger.warning("browser sentinel cdp ready check failed: %s", cdp_stderr)
             raise BrowserSentinelError("chrome cdp port not responding")
 
         with sync_playwright() as playwright:
