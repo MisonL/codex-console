@@ -4,6 +4,7 @@ import json
 from src.config.constants import EmailServiceType, OPENAI_API_ENDPOINTS, OPENAI_PAGE_TYPES
 from src.core.http_client import OpenAIHTTPClient
 from src.core.openai.oauth import OAuthStart
+from src.core.openai.sentinel_browser import BrowserSentinelArtifacts
 from src.core.register import RegistrationEngine
 from src.services.base import BaseEmailService
 
@@ -166,6 +167,17 @@ def _response_with_login_cookies(workspace_id="ws-1", session_token="session-1")
     return DummyResponse(status_code=200, payload={}, on_return=setter)
 
 
+def _patch_browser_sentinel(monkeypatch):
+    def fake_browser_sentinel(self, *, flow, page_url, include_session_observer=False, include_passkey_capabilities=False):
+        return BrowserSentinelArtifacts(
+            token=json.dumps({"id": "browser-did", "flow": flow, "c": f"token-{flow}"}, separators=(",", ":")),
+            session_observer_token="so-token" if include_session_observer else None,
+            passkey_capabilities='{"conditionalGet":true}' if include_passkey_capabilities else None,
+        )
+
+    monkeypatch.setattr(RegistrationEngine, "_fetch_browser_sentinel_artifacts", fake_browser_sentinel)
+
+
 def test_check_sentinel_sends_non_empty_pow(monkeypatch):
     session = QueueSession([
         ("POST", OPENAI_API_ENDPOINTS["sentinel"], DummyResponse(payload={"token": "sentinel-token"})),
@@ -188,6 +200,7 @@ def test_check_sentinel_sends_non_empty_pow(monkeypatch):
 
 
 def test_register_password_sends_device_and_sentinel_headers(monkeypatch):
+    _patch_browser_sentinel(monkeypatch)
     session = QueueSession([
         ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
     ])
@@ -196,7 +209,9 @@ def test_register_password_sends_device_and_sentinel_headers(monkeypatch):
     engine.session = session
     engine.email = "tester@example.com"
     engine.password = None
+    engine.device_id = "did-123"
     engine._last_register_password_error = None
+    engine._last_register_password_request_id = None
     engine._log = lambda *_args, **_kwargs: None
     monkeypatch.setattr(engine, "_generate_password", lambda length=12: "Aa1!fixedPwd")
 
@@ -211,14 +226,16 @@ def test_register_password_sends_device_and_sentinel_headers(monkeypatch):
     call = session.calls[0]
     headers = call["kwargs"]["headers"]
     assert headers["oai-device-id"] == "did-123"
-    assert headers["openai-sentinel-token"] == (
-        '{"p":"","t":"","c":"sentinel-token","id":"did-123","flow":"authorize_continue"}'
+    assert headers["OpenAI-Sentinel-Token"] == (
+        '{"id":"browser-did","flow":"username_password_create","c":"token-username_password_create"}'
     )
+    assert headers["ext-passkey-client-capabilities"] == '{"conditionalGet":true}'
     body = json.loads(call["kwargs"]["data"])
     assert body == {"password": "Aa1!fixedPwd", "username": "tester@example.com"}
 
 
-def test_run_registers_then_relogs_to_fetch_token():
+def test_run_registers_then_relogs_to_fetch_token(monkeypatch):
+    _patch_browser_sentinel(monkeypatch)
     session_one = QueueSession([
         ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
         (
@@ -283,10 +300,19 @@ def test_run_registers_then_relogs_to_fetch_token():
     assert relogin_start_body["username"]["value"] == "tester@example.com"
     password_verify_body = json.loads(session_two.calls[2]["kwargs"]["data"])
     assert password_verify_body == {"password": result.password}
+    register_headers = session_one.calls[2]["kwargs"]["headers"]
+    assert register_headers["OpenAI-Sentinel-Token"] == '{"id":"browser-did","flow":"username_password_create","c":"token-username_password_create"}'
+    assert register_headers["ext-passkey-client-capabilities"] == '{"conditionalGet":true}'
+    create_account_headers = session_one.calls[5]["kwargs"]["headers"]
+    assert create_account_headers["OpenAI-Sentinel-Token"] == '{"id":"browser-did","flow":"oauth_create_account","c":"token-oauth_create_account"}'
+    assert create_account_headers["OpenAI-Sentinel-SO-Token"] == "so-token"
+    password_headers = session_two.calls[2]["kwargs"]["headers"]
+    assert password_headers["OpenAI-Sentinel-Token"] == '{"id":"browser-did","flow":"password_verify","c":"token-password_verify"}'
     assert result.metadata["token_acquired_via_relogin"] is True
 
 
-def test_existing_account_login_uses_auto_sent_otp_without_manual_send():
+def test_existing_account_login_uses_auto_sent_otp_without_manual_send(monkeypatch):
+    _patch_browser_sentinel(monkeypatch)
     session = QueueSession([
         ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
         (

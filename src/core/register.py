@@ -18,6 +18,7 @@ from curl_cffi import requests as cffi_requests
 
 from .anyauto.register_flow import AnyAutoRegistrationEngine
 from .openai.oauth import OAuthManager, OAuthStart
+from .openai.sentinel_browser import BrowserSentinelError, fetch_browser_sentinel_artifacts
 from .http_client import OpenAIHTTPClient, HTTPClientError
 from ..services import EmailServiceFactory, BaseEmailService, EmailServiceType
 from ..database import crud
@@ -509,6 +510,50 @@ class RegistrationEngine:
             separators=(",", ":"),
         )
 
+    def _browser_sentinel_headless(self) -> bool:
+        return True
+
+    def _current_browser_identity(self) -> tuple[str, str]:
+        session_headers = getattr(self.session, "headers", None)
+        user_agent = ""
+        accept_language = ""
+        if session_headers:
+            try:
+                user_agent = str(session_headers.get("User-Agent") or "").strip()
+                accept_language = str(session_headers.get("Accept-Language") or "").strip()
+            except Exception:
+                user_agent = ""
+                accept_language = ""
+        if not user_agent:
+            user_agent = str(self.http_client.default_headers.get("User-Agent") or "").strip()
+        if not accept_language:
+            accept_language = str(self.http_client.default_headers.get("Accept-Language") or "").strip()
+        return user_agent, accept_language
+
+    def _fetch_browser_sentinel_artifacts(
+        self,
+        *,
+        flow: str,
+        page_url: str,
+        include_session_observer: bool = False,
+        include_passkey_capabilities: bool = False,
+    ):
+        resolved_did = str(self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
+        if not resolved_did:
+            raise BrowserSentinelError("missing oai-did for browser sentinel flow")
+        user_agent, accept_language = self._current_browser_identity()
+        return fetch_browser_sentinel_artifacts(
+            flow=flow,
+            device_id=resolved_did,
+            page_url=page_url,
+            proxy=self.proxy_url,
+            user_agent=user_agent,
+            accept_language=accept_language,
+            include_session_observer=include_session_observer,
+            include_passkey_capabilities=include_passkey_capabilities,
+            headless=self._browser_sentinel_headless(),
+        )
+
     def _submit_auth_start(
         self,
         did: str,
@@ -545,8 +590,9 @@ class RegistrationEngine:
                 }
 
                 sentinel_header = self._build_sentinel_header_value(current_did, current_sen_token)
-                if sentinel_header:
+                if current_did:
                     headers["oai-device-id"] = current_did
+                if sentinel_header:
                     headers["openai-sentinel-token"] = sentinel_header
 
                 response = self.session.post(
@@ -689,12 +735,20 @@ class RegistrationEngine:
 
         for attempt in range(1, max_attempts + 1):
             try:
+                did = str(self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
+                sentinel = self._fetch_browser_sentinel_artifacts(
+                    flow="password_verify",
+                    page_url="https://auth.openai.com/log-in/password",
+                )
                 response = self.session.post(
                     OPENAI_API_ENDPOINTS["password_verify"],
                     headers={
                         "referer": "https://auth.openai.com/log-in/password",
+                        "origin": "https://auth.openai.com",
                         "accept": "application/json",
                         "content-type": "application/json",
+                        "oai-device-id": did,
+                        "OpenAI-Sentinel-Token": self._build_sentinel_header_value(did, sentinel.token),
                     },
                     data=json.dumps({"password": self.password}),
                 )
@@ -2012,6 +2066,16 @@ class RegistrationEngine:
             self.password = password  # 保存密码到实例变量
             self._log(f"生成密码: {password}")
 
+            sentinel = self._fetch_browser_sentinel_artifacts(
+                flow="username_password_create",
+                page_url="https://auth.openai.com/create-account/password",
+                include_passkey_capabilities=True,
+            )
+            resolved_did = str(did or self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
+            sentinel_header = self._build_sentinel_header_value(resolved_did, sentinel.token)
+            if not sentinel_header:
+                raise BrowserSentinelError("empty browser sentinel header for register")
+
             # 提交密码注册
             register_body = json.dumps({
                 "password": password,
@@ -2024,12 +2088,10 @@ class RegistrationEngine:
                 "origin": "https://auth.openai.com",
                 "accept": "application/json",
                 "content-type": "application/json",
+                "oai-device-id": resolved_did,
+                "OpenAI-Sentinel-Token": sentinel_header,
+                "ext-passkey-client-capabilities": sentinel.passkey_capabilities or "{}",
             }
-            sentinel_header = self._build_sentinel_header_value(resolved_did, sen_token)
-            if resolved_did:
-                headers["oai-device-id"] = resolved_did
-            if sentinel_header:
-                headers["openai-sentinel-token"] = sentinel_header
 
             response = self.session.post(
                 OPENAI_API_ENDPOINTS["register"],
@@ -2408,14 +2470,30 @@ class RegistrationEngine:
             user_info = generate_random_user_info()
             self._log(f"生成用户信息: {user_info['name']}, 生日: {user_info['birthdate']}")
             create_account_body = json.dumps(user_info)
+            sentinel = self._fetch_browser_sentinel_artifacts(
+                flow="oauth_create_account",
+                page_url="https://auth.openai.com/about-you",
+                include_session_observer=True,
+            )
+            resolved_did = str(self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
+            sentinel_header = self._build_sentinel_header_value(resolved_did, sentinel.token)
+            if not sentinel_header:
+                raise BrowserSentinelError("empty browser sentinel header for create_account")
+
+            headers = {
+                "referer": "https://auth.openai.com/about-you",
+                "origin": "https://auth.openai.com",
+                "accept": "application/json",
+                "content-type": "application/json",
+                "oai-device-id": resolved_did,
+                "OpenAI-Sentinel-Token": sentinel_header,
+            }
+            if sentinel.session_observer_token:
+                headers["OpenAI-Sentinel-SO-Token"] = sentinel.session_observer_token
 
             response = self.session.post(
                 OPENAI_API_ENDPOINTS["create_account"],
-                headers={
-                    "referer": "https://auth.openai.com/about-you",
-                    "accept": "application/json",
-                    "content-type": "application/json",
-                },
+                headers=headers,
                 data=create_account_body,
             )
 

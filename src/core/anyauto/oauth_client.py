@@ -5,6 +5,7 @@ OAuth 客户端模块 - 处理 Codex OAuth 登录流程
 import time
 import secrets
 from urllib.parse import urlparse, parse_qs
+from typing import Optional
 
 try:
     from curl_cffi import requests as curl_requests
@@ -22,6 +23,7 @@ from .utils import (
     random_delay,
     seed_oai_device_cookie,
 )
+from ..openai.sentinel_browser import fetch_browser_sentinel_artifacts
 from .sentinel_token import build_sentinel_token
 
 
@@ -66,6 +68,32 @@ class OAuthClient:
         """在 headed 模式下注入轻微延迟，模拟真实浏览器操作节奏。"""
         if self.browser_mode == "headed":
             random_delay(low, high)
+
+    def _browser_sentinel_headless(self) -> bool:
+        return self.browser_mode != "headed"
+
+    def _fetch_browser_sentinel_artifacts(
+        self,
+        *,
+        flow: str,
+        page_url: str,
+        device_id: str,
+        user_agent: Optional[str],
+        accept_language: Optional[str] = None,
+        include_session_observer: bool = False,
+        include_passkey_capabilities: bool = False,
+    ):
+        return fetch_browser_sentinel_artifacts(
+            flow=flow,
+            device_id=device_id,
+            page_url=page_url,
+            proxy=self.proxy,
+            user_agent=user_agent,
+            accept_language=accept_language,
+            include_session_observer=include_session_observer,
+            include_passkey_capabilities=include_passkey_capabilities,
+            headless=self._browser_sentinel_headless(),
+        )
 
     @staticmethod
     def _iter_text_fragments(value):
@@ -513,16 +541,13 @@ class OAuthClient:
     def _submit_password_verify(self, password, device_id, *, user_agent=None, sec_ch_ua=None, impersonate=None, referer=None):
         """提交密码，获取下一步状态。"""
         self._log("步骤3: POST /api/accounts/password/verify")
-
-        sentinel_pwd = build_sentinel_token(
-            self.session,
-            device_id,
+        sentinel_pwd = self._fetch_browser_sentinel_artifacts(
             flow="password_verify",
+            page_url=f"{self.oauth_issuer}/log-in/password",
+            device_id=device_id,
             user_agent=user_agent,
-            sec_ch_ua=sec_ch_ua,
-            impersonate=impersonate,
         )
-        if not sentinel_pwd:
+        if not sentinel_pwd or not sentinel_pwd.token:
             self._set_error("无法获取 sentinel token (password_verify)")
             return None
 
@@ -538,7 +563,7 @@ class OAuthClient:
             fetch_site="same-origin",
             extra_headers={
                 "oai-device-id": device_id,
-                "openai-sentinel-token": sentinel_pwd,
+                "OpenAI-Sentinel-Token": sentinel_pwd.token,
             },
         )
         headers.update(generate_datadog_trace())

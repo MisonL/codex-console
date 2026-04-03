@@ -3,6 +3,7 @@ from src.core.anyauto import chatgpt_client as chatgpt_client_module
 from src.core.anyauto import register_flow as register_flow_module
 from src.core.anyauto.chatgpt_client import ChatGPTClient
 from src.core.anyauto.register_flow import AnyAutoRegistrationEngine
+from src.core.openai.sentinel_browser import BrowserSentinelArtifacts
 from src.core.register import RegistrationEngine
 from src.core.utils import generate_password
 
@@ -150,10 +151,11 @@ def test_anyauto_register_user_sends_device_and_sentinel_headers(monkeypatch):
     client._headers = lambda url, **kwargs: {"accept": kwargs["accept"], **(kwargs.get("extra_headers") or {})}
 
     monkeypatch.setattr(
-        chatgpt_client_module,
-        "build_sentinel_token",
-        lambda session, device_id, flow, user_agent=None, sec_ch_ua=None, impersonate=None: (
-            '{"p":"pow","t":"","c":"sentinel","id":"did-456","flow":"authorize_continue"}'
+        client,
+        "_fetch_browser_sentinel_artifacts",
+        lambda **kwargs: BrowserSentinelArtifacts(
+            token='{"id":"did-456","flow":"username_password_create","c":"sentinel"}',
+            passkey_capabilities='{"conditionalGet":true}',
         ),
     )
     monkeypatch.setattr(chatgpt_client_module, "generate_datadog_trace", lambda: {"x-trace-id": "trace-1"})
@@ -167,9 +169,8 @@ def test_anyauto_register_user_sends_device_and_sentinel_headers(monkeypatch):
     assert url == "https://auth.openai.com/api/accounts/user/register"
     assert kwargs["json"] == {"username": "tester@example.com", "password": "Aa1!fixedPwd"}
     assert kwargs["headers"]["oai-device-id"] == "did-456"
-    assert kwargs["headers"]["openai-sentinel-token"] == (
-        '{"p":"pow","t":"","c":"sentinel","id":"did-456","flow":"authorize_continue"}'
-    )
+    assert kwargs["headers"]["OpenAI-Sentinel-Token"] == '{"id":"did-456","flow":"username_password_create","c":"sentinel"}'
+    assert kwargs["headers"]["ext-passkey-client-capabilities"] == '{"conditionalGet":true}'
     assert kwargs["headers"]["x-trace-id"] == "trace-1"
 
 
@@ -206,9 +207,12 @@ def test_anyauto_register_user_upgrades_generic_400_to_environment_rejection(mon
     client._headers = lambda url, **kwargs: {"accept": kwargs["accept"], **(kwargs.get("extra_headers") or {})}
 
     monkeypatch.setattr(
-        chatgpt_client_module,
-        "build_sentinel_token",
-        lambda session, device_id, flow, user_agent=None, sec_ch_ua=None, impersonate=None: "sentinel-token",
+        client,
+        "_fetch_browser_sentinel_artifacts",
+        lambda **kwargs: BrowserSentinelArtifacts(
+            token='{"id":"did-456","flow":"username_password_create","c":"sentinel"}',
+            passkey_capabilities='{"conditionalGet":true}',
+        ),
     )
     monkeypatch.setattr(chatgpt_client_module, "generate_datadog_trace", lambda: {"x-trace-id": "trace-1"})
 
