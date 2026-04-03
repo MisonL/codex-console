@@ -284,7 +284,9 @@ def _find_chrome_binary() -> str:
     candidates = [
         env_path,
         os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux/chrome"),
+        os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome"),
         "/ms-playwright/chromium-*/chrome-linux/chrome",
+        "/ms-playwright/chromium-*/chrome-linux64/chrome",
         os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
         os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
         os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
