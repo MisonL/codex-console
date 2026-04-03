@@ -97,13 +97,21 @@ class AnyAutoRegistrationEngine:
     @staticmethod
     def _should_retry(message: str) -> bool:
         text = str(message or "").lower()
+        non_retryable_markers = [
+            "registration_disallowed",
+            "cannot create your account with the given information",
+            "不允许继续创建账号",
+            "当前出口 ip / 设备指纹 / 会话环境很可能触发风控",
+            "create-account/password 阶段",
+        ]
+        if any(marker in text for marker in non_retryable_markers):
+            return False
         retriable_markers = [
             "tls",
             "ssl",
             "curl: (35)",
             "预授权被拦截",
             "authorize",
-            "registration_disallowed",
             "http 400",
             "创建账号失败",
             "未获取到 authorization code",

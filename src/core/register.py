@@ -151,6 +151,7 @@ class RegistrationEngine:
         self._last_validate_otp_continue_url: Optional[str] = None
         self._last_validate_otp_workspace_id: Optional[str] = None
         self._last_register_password_error: Optional[str] = None
+        self._last_register_password_request_id: Optional[str] = None
         self._last_otp_validation_code: Optional[str] = None
         self._last_otp_validation_status_code: Optional[int] = None
         self._last_otp_validation_outcome: str = ""  # success/http_non_200/network_timeout/network_error
@@ -488,6 +489,26 @@ class RegistrationEngine:
             self._log(f"Sentinel 检查异常: {e}", "warning")
             return None
 
+    @staticmethod
+    def _build_sentinel_header_value(did: Optional[str], sen_token: Optional[str]) -> Optional[str]:
+        """标准化 openai-sentinel-token 请求头。"""
+        token_text = str(sen_token or "").strip()
+        if not token_text:
+            return None
+        if token_text.startswith("{"):
+            return token_text
+        device_id = str(did or "").strip()
+        return json.dumps(
+            {
+                "p": "",
+                "t": "",
+                "c": token_text,
+                "id": device_id,
+                "flow": "authorize_continue",
+            },
+            separators=(",", ":"),
+        )
+
     def _submit_auth_start(
         self,
         did: str,
@@ -523,15 +544,10 @@ class RegistrationEngine:
                     "content-type": "application/json",
                 }
 
-                if current_sen_token:
-                    sentinel = json.dumps({
-                        "p": "",
-                        "t": "",
-                        "c": current_sen_token,
-                        "id": current_did,
-                        "flow": "authorize_continue",
-                    })
-                    headers["openai-sentinel-token"] = sentinel
+                sentinel_header = self._build_sentinel_header_value(current_did, current_sen_token)
+                if sentinel_header:
+                    headers["oai-device-id"] = current_did
+                    headers["openai-sentinel-token"] = sentinel_header
 
                 response = self.session.post(
                     OPENAI_API_ENDPOINTS["signup"],
@@ -1990,6 +2006,7 @@ class RegistrationEngine:
         """注册密码"""
         try:
             self._last_register_password_error = None
+            self._last_register_password_request_id = None
             # 生成密码
             password = self._generate_password()
             self.password = password  # 保存密码到实例变量
@@ -2001,17 +2018,29 @@ class RegistrationEngine:
                 "username": self.email
             })
 
+            resolved_did = str(did or self.device_id or self.session.cookies.get("oai-did") or "").strip()
+            headers = {
+                "referer": "https://auth.openai.com/create-account/password",
+                "origin": "https://auth.openai.com",
+                "accept": "application/json",
+                "content-type": "application/json",
+            }
+            sentinel_header = self._build_sentinel_header_value(resolved_did, sen_token)
+            if resolved_did:
+                headers["oai-device-id"] = resolved_did
+            if sentinel_header:
+                headers["openai-sentinel-token"] = sentinel_header
+
             response = self.session.post(
                 OPENAI_API_ENDPOINTS["register"],
-                headers={
-                    "referer": "https://auth.openai.com/create-account/password",
-                    "accept": "application/json",
-                    "content-type": "application/json",
-                },
+                headers=headers,
                 data=register_body,
             )
+            self._last_register_password_request_id = str(response.headers.get("x-request-id") or "").strip() or None
 
             self._log(f"提交密码状态: {response.status_code}")
+            if self._last_register_password_request_id:
+                self._log(f"注册密码请求 ID: {self._last_register_password_request_id}")
 
             if response.status_code != 200:
                 error_text = response.text[:500]
@@ -2052,6 +2081,14 @@ class RegistrationEngine:
                                     )
                             except Exception as probe_error:
                                 self._log(f"登录入口探测失败: {probe_error}", "warning")
+                    elif normalized_error_code == "registration_disallowed":
+                        self._last_register_password_error = (
+                            "OpenAI 拒绝当前注册请求（registration_disallowed），当前邮箱/IP/指纹组合不允许继续创建账号"
+                        )
+                    elif "cannot create your account with the given information" in normalized_error_msg.lower():
+                        self._last_register_password_error = (
+                            "OpenAI 拒绝当前注册请求，当前邮箱/IP/指纹组合不允许继续创建账号"
+                        )
                     else:
                         self._last_register_password_error = (
                             f"注册密码接口返回异常: {normalized_error_msg or f'HTTP {response.status_code}'}"
@@ -2068,6 +2105,16 @@ class RegistrationEngine:
             self._last_register_password_error = str(e)
             return False, None
 
+    def _build_register_password_environment_rejection(self, request_id: Optional[str] = None) -> str:
+        message = (
+            "OpenAI 在 create-account/password 阶段连续拒绝当前注册请求，"
+            "当前出口 IP / 设备指纹 / 会话环境很可能触发风控"
+        )
+        resolved_request_id = str(request_id or getattr(self, "_last_register_password_request_id", "") or "").strip()
+        if resolved_request_id:
+            return f"{message}（x-request-id: {resolved_request_id}）"
+        return message
+
     def _register_password_with_retry(
         self,
         did: Optional[str] = None,
@@ -2075,29 +2122,56 @@ class RegistrationEngine:
     ) -> Tuple[bool, Optional[str]]:
         """Retry password registration when OpenAI returns a generic recoverable 400."""
         max_attempts = 3
+        current_did = str(did or getattr(self, "device_id", None) or "").strip()
+        current_sen_token = str(sen_token or "").strip() if sen_token else None
+        non_retryable_markers = (
+            "registration_disallowed",
+            "cannot create your account with the given information",
+            "不允许继续创建账号",
+        )
         retryable_markers = (
             "failed to create account",
             "create account",
             "invalid_request_error",
             "http 400",
         )
+        generic_create_account_failures = 0
 
         for attempt in range(1, max_attempts + 1):
-            success, password = self._register_password(did, sen_token)
+            success, password = self._register_password(current_did, current_sen_token)
             if success:
                 return True, password
 
             error_text = str(self._last_register_password_error or "").strip().lower()
+            is_generic_create_account_failure = (
+                "failed to create account" in error_text
+                and not any(marker in error_text for marker in non_retryable_markers)
+            )
+            if is_generic_create_account_failure:
+                generic_create_account_failures += 1
+            if any(marker in error_text for marker in non_retryable_markers):
+                break
             if attempt >= max_attempts:
                 break
             if not any(marker in error_text for marker in retryable_markers):
                 break
 
+            if current_did:
+                try:
+                    refreshed = self._check_sentinel(current_did)
+                    if refreshed:
+                        current_sen_token = refreshed
+                except Exception:
+                    pass
             self._log(
                 f"密码注册命中可重试 400，准备重新生成密码后重试 ({attempt}/{max_attempts})...",
                 "warning",
             )
             time.sleep(min(2 * attempt, 4))
+
+        if generic_create_account_failures >= max_attempts:
+            self._last_register_password_error = self._build_register_password_environment_rejection()
+            self._log(self._last_register_password_error, "error")
 
         return False, None
 

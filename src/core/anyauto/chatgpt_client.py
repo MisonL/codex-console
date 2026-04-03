@@ -60,6 +60,17 @@ def _random_chrome_version():
     return profile["impersonate"], major, full_ver, ua, profile["sec_ch_ua"]
 
 
+def _format_environment_rejection_message(request_id, retry_scope="直接"):
+    message = (
+        f"OpenAI 在 create-account/password 阶段{retry_scope}拒绝当前注册请求，"
+        "当前出口 IP / 设备指纹 / 会话环境很可能触发风控"
+    )
+    resolved_request_id = str(request_id or "").strip()
+    if resolved_request_id:
+        return f"{message}（x-request-id: {resolved_request_id}）"
+    return message
+
+
 class ChatGPTClient:
     """ChatGPT 注册客户端"""
     
@@ -552,6 +563,18 @@ class ChatGPTClient:
         """
         self._log(f"注册用户: {email}")
         url = f"{self.AUTH}/api/accounts/user/register"
+        sentinel_token = build_sentinel_token(
+            self.session,
+            self.device_id,
+            flow="authorize_continue",
+            user_agent=self.ua,
+            sec_ch_ua=self.sec_ch_ua,
+            impersonate=self.impersonate,
+        )
+        if sentinel_token:
+            self._log("register_user: 已生成 sentinel token")
+        else:
+            self._log("register_user: 未生成 sentinel token，降级继续请求")
         
         headers = self._headers(
             url,
@@ -560,7 +583,12 @@ class ChatGPTClient:
             origin=self.AUTH,
             content_type="application/json",
             fetch_site="same-origin",
+            extra_headers={
+                "oai-device-id": self.device_id,
+            },
         )
+        if sentinel_token:
+            headers["openai-sentinel-token"] = sentinel_token
         headers.update(generate_datadog_trace())
         
         payload = {
@@ -577,13 +605,32 @@ class ChatGPTClient:
                 self._log("注册成功")
                 return True, "注册成功"
             else:
+                request_id = str(r.headers.get("x-request-id") or "").strip()
                 try:
                     error_data = r.json()
                     error_msg = error_data.get("error", {}).get("message", r.text[:200])
+                    error_code = error_data.get("error", {}).get("code", "")
                 except:
                     error_msg = r.text[:200]
-                self._log(f"注册失败: {r.status_code} - {error_msg}")
-                return False, f"HTTP {r.status_code}: {error_msg}"
+                    error_code = ""
+
+                normalized_error_msg = str(error_msg or "").strip()
+                normalized_error_code = str(error_code or "").strip().lower()
+                lowered_error_msg = normalized_error_msg.lower()
+                if request_id:
+                    self._log(f"register_user 请求 ID: {request_id}")
+
+                if normalized_error_code == "registration_disallowed" or (
+                    "cannot create your account with the given information" in lowered_error_msg
+                ):
+                    message = _format_environment_rejection_message(request_id)
+                elif "failed to create account" in lowered_error_msg and r.status_code == 400:
+                    message = _format_environment_rejection_message(request_id)
+                else:
+                    message = f"HTTP {r.status_code}: {normalized_error_msg}"
+
+                self._log(f"注册失败: {r.status_code} - {message}")
+                return False, message
                 
         except Exception as e:
             self._log(f"注册异常: {e}")
