@@ -327,20 +327,22 @@ def wait_for_cdp_ready(cdp_url: str, chrome_proc, timeout_seconds: int) -> Tuple
     deadline = time.time() + max(int(timeout_seconds), 5)
     stderr_buffer: List[str] = []
     stderr_stream = getattr(chrome_proc, "stderr", None)
+    stderr_fd = None
     if stderr_stream is not None:
         try:
-            os.set_blocking(stderr_stream.fileno(), False)
+            stderr_fd = stderr_stream.fileno()
+            os.set_blocking(stderr_fd, False)
         except Exception:
-            pass
+            stderr_fd = None
 
     while time.time() < deadline:
-        if stderr_stream is not None:
+        if stderr_fd is not None:
             try:
-                chunk = stderr_stream.read()
+                chunk = os.read(stderr_fd, 65536)
             except Exception:
-                chunk = ""
+                chunk = b""
             if chunk:
-                text = str(chunk)
+                text = chunk.decode("utf-8", errors="replace")
                 stderr_buffer.append(text)
                 if "DevTools listening on" in text:
                     return True, "".join(stderr_buffer)[-4000:]
@@ -357,13 +359,13 @@ def wait_for_cdp_ready(cdp_url: str, chrome_proc, timeout_seconds: int) -> Tuple
             break
         time.sleep(0.5)
 
-    if stderr_stream is not None:
+    if stderr_fd is not None:
         try:
-            chunk = stderr_stream.read()
+            chunk = os.read(stderr_fd, 65536)
         except Exception:
-            chunk = ""
+            chunk = b""
         if chunk:
-            stderr_buffer.append(str(chunk))
+            stderr_buffer.append(chunk.decode("utf-8", errors="replace"))
     return False, "".join(stderr_buffer)[-4000:]
 
 
