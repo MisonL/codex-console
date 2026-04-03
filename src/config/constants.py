@@ -133,7 +133,7 @@ def account_label_to_role_tag(account_label: str) -> str:
 # ============================================================================
 
 APP_NAME = "OpenAI/Codex CLI 自动注册系统"
-APP_VERSION = "1.1.2"
+APP_VERSION = "2.7.8"
 APP_DESCRIPTION = "自动注册 OpenAI/Codex CLI 账号的系统"
 
 # ============================================================================
