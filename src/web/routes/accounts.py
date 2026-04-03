@@ -680,8 +680,6 @@ def _run_batch_codex_auth_repair_async(task_id: str, request_data: Dict[str, Any
             error=str(exc),
             result=result,
         )
-
-
 def _run_batch_refresh_async(task_id: str, request_data: Dict[str, Any]) -> None:
     acquired, running, quota = task_manager.try_acquire_domain_slot("accounts", task_id)
     if not acquired:
@@ -3296,8 +3294,6 @@ async def export_codex_auth_artifacts(request: BatchCodexAuthRequest):
             media_type="application/zip",
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
-
-
 # ============== CPA 上传相关 ==============
 
 class CPAUploadRequest(BaseModel):
