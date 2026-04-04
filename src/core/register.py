@@ -2907,6 +2907,12 @@ class RegistrationEngine:
                 self._log("检测到 Outlook 邮箱，自动使用 Outlook 入口链路（无需在设置中选择）")
                 effective_entry_flow = "outlook"
 
+            # 针对 native 和 abcard 模式，直接调用已经优化的 AnyAuto 引擎（PR60 架构）
+            # 该引擎处理 OAuth 回调逻辑更稳健，能避免二次登录触发验证码。
+            if effective_entry_flow in {"native", "abcard"}:
+                self._log(f"正在切换至优化版 AnyAuto 引擎执行 {effective_entry_flow} 链路...")
+                return self._run_anyauto_fallback()
+
             # 1. 检查 IP 地理位置
             self._log("1. 先看看这条网络从哪儿来，别一开局就站错片场...")
             ip_ok, location = self._check_ip_location()
