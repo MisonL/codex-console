@@ -599,18 +599,23 @@ class ChatGPTClient:
             from core.openai.sentinel_token_v2 import build_sentinel_token
             # 提供必要的 accept 参数以符合方法定义
             user_agent = self._headers(url, accept="application/json").get("user-agent", "")
+            self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow=username_password_create")
             sentinel_header = build_sentinel_token(self.session, self.device_id, flow="username_password_create", user_agent=user_agent)
             if sentinel_header:
                 self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            else:
+                self._log("纯 Python PoW 算法返回了空 Token，准备降级到浏览器", "warning")
         except Exception as e:
-            self._log(f"纯 Python PoW 算法异常: {e}")
+            self._log(f"纯 Python PoW 算法异常: {e}", "warning")
             
         if not sentinel_header:
+            self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")
             sentinel = self._fetch_browser_sentinel_artifacts(
                 flow="username_password_create",
                 page_url=f"{self.AUTH}/create-account/password",
             )
             sentinel_header = sentinel.token if sentinel else "{}"
+            self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel)}")
 
         headers = self._headers(
             url,
@@ -759,12 +764,35 @@ class ChatGPTClient:
         name = f"{first_name} {last_name}"
         self._log(f"完成账号创建: {name}")
         url = f"{self.AUTH}/api/accounts/create_account"
-        sentinel = self._fetch_browser_sentinel_artifacts(
-            flow="oauth_create_account",
-            page_url=f"{self.AUTH}/about-you",
-            include_session_observer=True,
-        )
         
+        sentinel_header = None
+        sentinel = None
+        try:
+            import os
+            import sys
+            sys.path.append(os.path.abspath("src"))
+            from core.openai.sentinel_token_v2 import build_sentinel_token
+            # 提供必要的 accept 参数以符合方法定义
+            user_agent = self._headers(url, accept="application/json").get("user-agent", "")
+            self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow=oauth_create_account")
+            sentinel_header = build_sentinel_token(self.session, self.device_id, flow="oauth_create_account", user_agent=user_agent)
+            if sentinel_header:
+                self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            else:
+                self._log("纯 Python PoW 算法返回了空 Token，准备降级到浏览器", "warning")
+        except Exception as e:
+            self._log(f"纯 Python PoW 算法异常: {e}", "warning")
+            
+        if not sentinel_header:
+            self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")
+            sentinel = self._fetch_browser_sentinel_artifacts(
+                flow="oauth_create_account",
+                page_url=f"{self.AUTH}/about-you",
+                include_session_observer=True,
+            )
+            sentinel_header = sentinel.token if sentinel else "{}"
+            self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel)}")
+
         headers = self._headers(
             url,
             accept="application/json",
@@ -774,10 +802,10 @@ class ChatGPTClient:
             fetch_site="same-origin",
             extra_headers={
                 "oai-device-id": self.device_id,
-                "OpenAI-Sentinel-Token": sentinel.token,
+                "OpenAI-Sentinel-Token": sentinel_header,
             },
         )
-        if sentinel.session_observer_token:
+        if sentinel and getattr(sentinel, 'session_observer_token', None):
             headers["OpenAI-Sentinel-SO-Token"] = sentinel.session_observer_token
         headers.update(generate_datadog_trace())
         

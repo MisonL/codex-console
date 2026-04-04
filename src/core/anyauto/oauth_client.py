@@ -541,13 +541,38 @@ class OAuthClient:
     def _submit_password_verify(self, password, device_id, *, user_agent=None, sec_ch_ua=None, impersonate=None, referer=None):
         """提交密码，获取下一步状态。"""
         self._log("步骤3: POST /api/accounts/password/verify")
-        sentinel_pwd = self._fetch_browser_sentinel_artifacts(
-            flow="password_verify",
-            page_url=f"{self.oauth_issuer}/log-in/password",
-            device_id=device_id,
-            user_agent=user_agent,
-        )
-        if not sentinel_pwd or not sentinel_pwd.token:
+        
+        sentinel_token = None
+        try:
+            # 优先使用纯 Python (Node VM) 方案
+            self._log("尝试使用纯 Python PoW (Node VM) 获取 Token, flow=password_verify")
+            sentinel_token = build_sentinel_token(
+                self.session,
+                device_id,
+                flow="password_verify",
+                user_agent=user_agent,
+                sec_ch_ua=sec_ch_ua,
+                impersonate=impersonate,
+            )
+            if sentinel_token:
+                self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            else:
+                self._log("纯 Python PoW 算法返回了空 Token，准备降级到浏览器", "warning")
+        except Exception as e:
+            self._log(f"纯 Python PoW 算法异常: {e}", "warning")
+
+        if not sentinel_token:
+            self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")
+            sentinel_pwd = self._fetch_browser_sentinel_artifacts(
+                flow="password_verify",
+                page_url=f"{self.oauth_issuer}/log-in/password",
+                device_id=device_id,
+                user_agent=user_agent,
+            )
+            sentinel_token = sentinel_pwd.token if sentinel_pwd else None
+            self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel_token)}")
+
+        if not sentinel_token:
             self._set_error("无法获取 sentinel token (password_verify)")
             return None
 
@@ -563,7 +588,7 @@ class OAuthClient:
             fetch_site="same-origin",
             extra_headers={
                 "oai-device-id": device_id,
-                "OpenAI-Sentinel-Token": sentinel_pwd.token,
+                "OpenAI-Sentinel-Token": sentinel_token,
             },
         )
         headers.update(generate_datadog_trace())
