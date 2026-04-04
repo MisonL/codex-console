@@ -597,7 +597,8 @@ class ChatGPTClient:
             import sys
             sys.path.append(os.path.abspath("src"))
             from core.openai.sentinel_token_v2 import build_sentinel_token
-            user_agent = self._headers(url).get("user-agent", "")
+            # 提供必要的 accept 参数以符合方法定义
+            user_agent = self._headers(url, accept="application/json").get("user-agent", "")
             sentinel_header = build_sentinel_token(self.session, self.device_id, flow="username_password_create", user_agent=user_agent)
             if sentinel_header:
                 self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
