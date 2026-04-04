@@ -194,7 +194,10 @@ class ChatGPTClient:
         seed_oai_device_cookie(self.session, self.device_id)
 
     def _browser_sentinel_headless(self) -> bool:
-        return self.browser_mode != "headed"
+        if self.browser_mode == "headed":
+            return False
+        import os
+        return not bool(os.environ.get("DISPLAY"))
 
     def _fetch_browser_sentinel_artifacts(
         self,

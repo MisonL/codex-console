@@ -75,7 +75,6 @@ def _chrome_args(
         "--disable-blink-features=AutomationControlled",
         "--window-size=1366,900",
         f"--user-data-dir={user_data_dir}",
-        "about:blank",
     ]
     if headless:
         args.extend(["--headless=new", "--disable-gpu"])
@@ -89,6 +88,8 @@ def _chrome_args(
         )
     if proxy:
         args.append(f"--proxy-server={proxy}")
+    
+    args.append("about:blank")
     return args
 
 
@@ -353,7 +354,7 @@ def fetch_browser_sentinel_artifacts(
                 
                 cf_ok, cf_note = _wait_for_cloudflare(page, max_wait_seconds=min(timeout_seconds, 20))
                 if not cf_ok:
-                    logger.warning("Cloudflare challenge not fully cleared, but will try to proceed: %s", cf_note)
+                    raise BrowserSentinelError(f"cloudflare challenge not passed in time: {cf_note}")
 
                 payload = _evaluate_sentinel(
                     page,

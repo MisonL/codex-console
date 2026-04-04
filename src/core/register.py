@@ -514,8 +514,16 @@ class RegistrationEngine:
     def _browser_sentinel_headless(self) -> bool:
         """决定是否使用无头模式获取 Sentinel 令牌。"""
         settings = get_settings()
-        # 默认使用无头模式，因为 headless=new 在 Docker 下比 XVFB 更有优势
-        return bool(getattr(settings, "registration_browser_sentinel_headless", True))
+        force_headless = getattr(settings, "registration_browser_sentinel_headless", None)
+        if force_headless is False:
+            return False
+        if force_headless is True:
+            return True
+        
+        # 智能判定：有显示环境则用有头模式（提高成功率，规避 CF Just a moment）
+        import os
+        has_display = bool(os.environ.get("DISPLAY"))
+        return not has_display
 
     def _current_browser_identity(self) -> tuple[str, str]:
         session_headers = getattr(self.session, "headers", None)
