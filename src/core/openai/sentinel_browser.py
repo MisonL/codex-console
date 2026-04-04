@@ -17,8 +17,8 @@ from .browser_bind import _find_chrome_binary, _wait_for_cloudflare, wait_for_cd
 
 logger = logging.getLogger(__name__)
 
-# 使用 robots.txt 页面以规避 Cloudflare 5s 盾，同时保持在正确的 Domain 下
-_DEFAULT_PAGE_URL = "https://sentinel.openai.com/robots.txt"
+# 使用 sentinel 的 frame 页面，即便 404，它也是 HTML 上下文，Origin 正确
+_DEFAULT_PAGE_URL = "https://sentinel.openai.com/backend-api/sentinel/frame.html"
 
 class BrowserSentinelError(RuntimeError):
     """Raised when a browser-backed Sentinel token cannot be minted."""
@@ -112,6 +112,17 @@ async ({ flow, includeSessionObserver, includePasskeyCapabilities }) => {
       console.log('SDK_ALREADY_PRESENT');
       return window.SentinelSDK;
     }
+    
+    // 确保 DOM 基础结构存在（针对 robots.txt 或 404 页面）
+    if (!document.head) {
+      const head = document.createElement('head');
+      document.documentElement.appendChild(head);
+    }
+    if (!document.body) {
+      const body = document.createElement('body');
+      document.documentElement.appendChild(body);
+    }
+
     const existing = Array.from(document.scripts).find((item) => {
       const src = String(item.src || '');
       return src.includes('sentinel.openai.com/backend-api/sentinel/sdk.js')
@@ -170,10 +181,10 @@ async ({ flow, includeSessionObserver, includePasskeyCapabilities }) => {
     }
 
     console.log('CALLING_SDK_TOKEN', flow);
-    // 给 45 秒超时，因为 Turnstile 可能很慢
+    // 给 60 秒超时，因为 Turnstile 可能很慢或正在加载
     const token = await Promise.race([
       sdk.token(flow),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Sentinel token timeout (JS)')), 45000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Sentinel token timeout (JS)')), 60000)),
     ]);
     console.log('SDK_TOKEN_DONE', { tokenLength: (token || "").length });
 
@@ -217,6 +228,12 @@ def fetch_browser_sentinel_artifacts(
 ) -> BrowserSentinelArtifacts:
     """Use a real browser SDK execution path to mint Sentinel artifacts."""
 
+    # 预清理：防止残留进程导致 CDP 冲突
+    try:
+        subprocess.run(["pkill", "-9", "-f", "codex-sentinel-"], stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
     chrome_binary = _find_chrome_binary()
     if not chrome_binary:
         raise BrowserSentinelError("chrome binary not found")
@@ -237,12 +254,25 @@ def fetch_browser_sentinel_artifacts(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,
         )
-        cdp_ready, cdp_stderr = wait_for_cdp_ready(cdp_url, chrome_proc, timeout_seconds=min(timeout_seconds, 20))
+        # 大幅增加等待时间，应对容器启动慢的问题
+        cdp_ready, cdp_stderr = wait_for_cdp_ready(cdp_url, chrome_proc, timeout_seconds=45)
         if not cdp_ready:
-            if cdp_stderr:
-                logger.warning("browser sentinel cdp ready check failed: %s", cdp_stderr)
-            raise BrowserSentinelError("chrome cdp port not responding")
+            # 尝试读取一些 stderr 输出来诊断
+            captured_err = ""
+            try:
+                import os
+                import fcntl
+                fd = chrome_proc.stderr.fileno()
+                fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                captured_err = chrome_proc.stderr.read() or ""
+            except Exception:
+                pass
+            
+            logger.error("Chrome failed to start. Stderr: %s | CDP Error: %s", captured_err, cdp_stderr)
+            raise BrowserSentinelError(f"chrome cdp port not responding: {captured_err[:100]}")
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(cdp_url)
