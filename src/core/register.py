@@ -748,10 +748,25 @@ class RegistrationEngine:
         for attempt in range(1, max_attempts + 1):
             try:
                 did = str(self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
-                sentinel = self._fetch_browser_sentinel_artifacts(
-                    flow="password_verify",
-                    page_url="https://auth.openai.com/log-in/password",
-                )
+                
+                sentinel_header = None
+                try:
+                    from .openai.sentinel_token_v2 import build_sentinel_token
+                    user_agent, _ = self._current_browser_identity()
+                    sentinel_header = build_sentinel_token(self.session, did, flow="password_verify", user_agent=user_agent)
+                except Exception as e:
+                    self._log(f"构建 Sentinel Token (纯 Python) 失败: {e}", "warning")
+
+                if not sentinel_header:
+                    try:
+                        sentinel = self._fetch_browser_sentinel_artifacts(
+                            flow="password_verify",
+                            page_url="https://auth.openai.com/log-in/password",
+                        )
+                        sentinel_header = self._build_sentinel_header_value(did, sentinel.token)
+                    except Exception:
+                        pass
+
                 response = self.session.post(
                     OPENAI_API_ENDPOINTS["password_verify"],
                     headers={
@@ -760,7 +775,7 @@ class RegistrationEngine:
                         "accept": "application/json",
                         "content-type": "application/json",
                         "oai-device-id": did,
-                        "OpenAI-Sentinel-Token": self._build_sentinel_header_value(did, sentinel.token),
+                        "OpenAI-Sentinel-Token": sentinel_header or "",
                     },
                     data=json.dumps({"password": self.password}),
                 )
@@ -2078,13 +2093,31 @@ class RegistrationEngine:
             self.password = password  # 保存密码到实例变量
             self._log(f"生成密码: {password}")
 
-            sentinel = self._fetch_browser_sentinel_artifacts(
-                flow="username_password_create",
-                page_url="https://auth.openai.com/create-account/password",
-                include_passkey_capabilities=True,
-            )
             resolved_did = str(did or self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
-            sentinel_header = self._build_sentinel_header_value(resolved_did, sentinel.token)
+            
+            sentinel = None
+            try:
+                from .openai.sentinel_token_v2 import build_sentinel_token
+                user_agent, _ = self._current_browser_identity()
+                sentinel_header = build_sentinel_token(self.session, resolved_did, flow="username_password_create", user_agent=user_agent)
+                if sentinel_header:
+                    self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            except Exception as e:
+                self._log(f"构建 Sentinel Token (纯 Python) 失败: {e}", "warning")
+                sentinel_header = None
+
+            if not sentinel_header:
+                # 降级方案：使用之前的 Browser 获取
+                try:
+                    sentinel = self._fetch_browser_sentinel_artifacts(
+                        flow="username_password_create",
+                        page_url="https://auth.openai.com/create-account/password",
+                        include_passkey_capabilities=True,
+                    )
+                    sentinel_header = self._build_sentinel_header_value(resolved_did, sentinel.token)
+                except Exception as e:
+                    self._log(f"Browser Sentinel 兜底失败: {e}", "warning")
+
             if not sentinel_header:
                 raise BrowserSentinelError("empty browser sentinel header for register")
 
@@ -2102,7 +2135,7 @@ class RegistrationEngine:
                 "content-type": "application/json",
                 "oai-device-id": resolved_did,
                 "OpenAI-Sentinel-Token": sentinel_header,
-                "ext-passkey-client-capabilities": sentinel.passkey_capabilities or "{}",
+                "ext-passkey-client-capabilities": getattr(sentinel, 'passkey_capabilities', "{}") if sentinel else "{}",
             }
 
             response = self.session.post(
@@ -2482,13 +2515,30 @@ class RegistrationEngine:
             user_info = generate_random_user_info()
             self._log(f"生成用户信息: {user_info['name']}, 生日: {user_info['birthdate']}")
             create_account_body = json.dumps(user_info)
-            sentinel = self._fetch_browser_sentinel_artifacts(
-                flow="oauth_create_account",
-                page_url="https://auth.openai.com/about-you",
-                include_session_observer=True,
-            )
             resolved_did = str(self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
-            sentinel_header = self._build_sentinel_header_value(resolved_did, sentinel.token)
+            
+            sentinel = None
+            try:
+                from .openai.sentinel_token_v2 import build_sentinel_token
+                user_agent, _ = self._current_browser_identity()
+                sentinel_header = build_sentinel_token(self.session, resolved_did, flow="oauth_create_account", user_agent=user_agent)
+                if sentinel_header:
+                    self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            except Exception as e:
+                self._log(f"构建 Sentinel Token (纯 Python) 失败: {e}", "warning")
+                sentinel_header = None
+
+            if not sentinel_header:
+                try:
+                    sentinel = self._fetch_browser_sentinel_artifacts(
+                        flow="oauth_create_account",
+                        page_url="https://auth.openai.com/about-you",
+                        include_session_observer=True,
+                    )
+                    sentinel_header = self._build_sentinel_header_value(resolved_did, sentinel.token)
+                except Exception as e:
+                    self._log(f"Browser Sentinel 兜底失败: {e}", "warning")
+
             if not sentinel_header:
                 raise BrowserSentinelError("empty browser sentinel header for create_account")
 

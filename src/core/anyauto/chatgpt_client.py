@@ -589,12 +589,29 @@ class ChatGPTClient:
         """
         self._log(f"注册用户: {email}")
         url = f"{self.AUTH}/api/accounts/user/register"
-        sentinel = self._fetch_browser_sentinel_artifacts(
-            flow="username_password_create",
-            page_url=f"{self.AUTH}/create-account/password",
-            include_passkey_capabilities=True,
-        )
         
+        sentinel_header = None
+        sentinel = None
+        try:
+            import os
+            import sys
+            sys.path.append(os.path.abspath("src"))
+            from core.openai.sentinel_token_v2 import build_sentinel_token
+            user_agent = self._headers(url).get("user-agent", "")
+            sentinel_header = build_sentinel_token(self.session, self.device_id, flow="username_password_create", user_agent=user_agent)
+            if sentinel_header:
+                self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+        except Exception as e:
+            self._log(f"纯 Python PoW 算法异常: {e}")
+            
+        if not sentinel_header:
+            sentinel = self._fetch_browser_sentinel_artifacts(
+                flow="username_password_create",
+                page_url=f"{self.AUTH}/create-account/password",
+                include_passkey_capabilities=True,
+            )
+            sentinel_header = sentinel.token if sentinel else "{}"
+
         headers = self._headers(
             url,
             accept="application/json",
@@ -604,10 +621,11 @@ class ChatGPTClient:
             fetch_site="same-origin",
             extra_headers={
                 "oai-device-id": self.device_id,
-                "OpenAI-Sentinel-Token": sentinel.token,
-                "ext-passkey-client-capabilities": sentinel.passkey_capabilities or "{}",
+                "OpenAI-Sentinel-Token": sentinel_header,
+                "ext-passkey-client-capabilities": getattr(sentinel, 'passkey_capabilities', "{}") if sentinel else "{}",
             },
         )
+
         headers.update(generate_datadog_trace())
         
         payload = {
