@@ -29,6 +29,8 @@ RUN apt-get update \
         websockify \
         novnc \
         ca-certificates \
+        nodejs \
+        npm \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件并安装

@@ -176,7 +176,14 @@ def fetch_sentinel_challenge(session, device_id, flow="authorize_continue", user
 
 
 def build_sentinel_token(session, device_id, flow="authorize_continue", user_agent=None, sec_ch_ua=None, impersonate=None):
-    """构建完整的 openai-sentinel-token JSON 字符串"""
+    """使用 Node VM 方案构建包含完整验证要素（包括 't' 值）的 openai-sentinel-token JSON 字符串"""
+    from .sentinel_vm.build_openai_sentinel_token import build_sentinel_token as vm_build
+    
+    token_json = vm_build(session, device_id, flow=flow, user_agent=user_agent)
+    if token_json:
+        return token_json
+        
+    # 如果 VM 方案失败，降级到纯 Python 方案（不带 t 值）
     challenge = fetch_sentinel_challenge(session, device_id, flow=flow, user_agent=user_agent, sec_ch_ua=sec_ch_ua, impersonate=impersonate)
     
     if not challenge:
