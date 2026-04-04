@@ -17,8 +17,8 @@ from .browser_bind import _find_chrome_binary, _wait_for_cloudflare, wait_for_cd
 
 logger = logging.getLogger(__name__)
 
-# 使用 Frame 页面以减少干扰并提高成功率 (参考社区经验)
-_DEFAULT_PAGE_URL = "https://sentinel.openai.com/backend-api/sentinel/frame.html"
+# 使用注册页面以获得正确的 Context 和 Origin
+_DEFAULT_PAGE_URL = "https://auth.openai.com/create-account/password"
 
 class BrowserSentinelError(RuntimeError):
     """Raised when a browser-backed Sentinel token cannot be minted."""
@@ -170,10 +170,10 @@ async ({ flow, includeSessionObserver, includePasskeyCapabilities }) => {
     }
 
     console.log('CALLING_SDK_TOKEN', flow);
-    // 给 35 秒超时，因为 Turnstile 可能很慢
+    // 给 45 秒超时，因为 Turnstile 可能很慢
     const token = await Promise.race([
       sdk.token(flow),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Sentinel token timeout (JS)')), 35000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Sentinel token timeout (JS)')), 45000)),
     ]);
     console.log('SDK_TOKEN_DONE', { tokenLength: (token || "").length });
 
@@ -246,25 +246,53 @@ def fetch_browser_sentinel_artifacts(
 
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(cdp_url)
+            
+            # 推断时区，默认使用系统或常用时区
+            timezone_id = "America/Los_Angeles" # 默认一个
+            if "sg" in str(proxy or "").lower():
+                timezone_id = "Asia/Singapore"
+            
             context = browser.new_context(
                 viewport={"width": 1366, "height": 900},
                 user_agent=str(user_agent or "").strip() or None,
                 locale=_infer_locale(accept_language),
+                timezone_id=timezone_id,
             )
             try:
-                # 增强的 Stealth 注入
+                # 极致 Stealth 注入
                 context.add_init_script("""
 (() => {
+  // 基础伪装
+  Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+  Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+  Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+  Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+  
+  // 模拟 Chrome 特有属性
+  window.chrome = {
+    runtime: {},
+    loadTimes: function() {},
+    csi: function() {},
+    app: {}
+  };
+  
+  // 伪装权限 API
   const originalQuery = window.navigator.permissions.query;
   window.navigator.permissions.query = (parameters) => (
     parameters.name === 'notifications' ?
       Promise.resolve({ state: Notification.permission }) :
       originalQuery(parameters)
   );
-  Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-  Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-  Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-  window.chrome = { runtime: {} };
+
+  // WebGL 指纹伪装
+  const getParameter = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function(parameter) {
+    // UNMASKED_VENDOR_WEBGL
+    if (parameter === 37445) return 'Google Inc. (Intel)';
+    // UNMASKED_RENDERER_WEBGL
+    if (parameter === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 (0x00003E9B) Direct3D11 vs_5_0 ps_5_0, D3D11)';
+    return getParameter.apply(this, arguments);
+  };
 })();
 """)
                 context.add_cookies(_build_auth_cookie_items(device_id))

@@ -320,6 +320,12 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         category=SettingCategory.REGISTRATION,
         description="注册入口链路（native=原本链路, abcard=ABCard入口链路；Outlook 邮箱会自动走 Outlook 链路）"
     ),
+    "registration_browser_sentinel_headless": SettingDefinition(
+        db_key="registration.browser_sentinel.headless",
+        default_value=True,
+        category=SettingCategory.REGISTRATION,
+        description="浏览器 Sentinel 令牌获取是否使用无头模式（容器环境下若有 XVFB 建议设为 False 以提高成功率）"
+    ),
 
     # 邮箱服务配置
     "registration_auto_enabled": SettingDefinition(

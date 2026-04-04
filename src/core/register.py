@@ -511,7 +511,9 @@ class RegistrationEngine:
         )
 
     def _browser_sentinel_headless(self) -> bool:
-        return True
+        """决定是否使用无头模式获取 Sentinel 令牌。"""
+        settings = get_settings()
+        return bool(getattr(settings, "registration_browser_sentinel_headless", True))
 
     def _current_browser_identity(self) -> tuple[str, str]:
         session_headers = getattr(self.session, "headers", None)
