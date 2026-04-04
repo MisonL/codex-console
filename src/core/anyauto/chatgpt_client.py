@@ -608,7 +608,6 @@ class ChatGPTClient:
             sentinel = self._fetch_browser_sentinel_artifacts(
                 flow="username_password_create",
                 page_url=f"{self.AUTH}/create-account/password",
-                include_passkey_capabilities=True,
             )
             sentinel_header = sentinel.token if sentinel else "{}"
 
@@ -622,7 +621,6 @@ class ChatGPTClient:
             extra_headers={
                 "oai-device-id": self.device_id,
                 "OpenAI-Sentinel-Token": sentinel_header,
-                "ext-passkey-client-capabilities": getattr(sentinel, 'passkey_capabilities', "{}") if sentinel else "{}",
             },
         )
 

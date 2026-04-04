@@ -2112,7 +2112,6 @@ class RegistrationEngine:
                     sentinel = self._fetch_browser_sentinel_artifacts(
                         flow="username_password_create",
                         page_url="https://auth.openai.com/create-account/password",
-                        include_passkey_capabilities=True,
                     )
                     sentinel_header = self._build_sentinel_header_value(resolved_did, sentinel.token)
                 except Exception as e:
@@ -2135,7 +2134,6 @@ class RegistrationEngine:
                 "content-type": "application/json",
                 "oai-device-id": resolved_did,
                 "OpenAI-Sentinel-Token": sentinel_header,
-                "ext-passkey-client-capabilities": getattr(sentinel, 'passkey_capabilities', "{}") if sentinel else "{}",
             }
 
             response = self.session.post(
