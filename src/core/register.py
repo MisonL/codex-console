@@ -3168,7 +3168,11 @@ class RegistrationEngine:
         return any(marker in error_text for marker in retryable_markers)
 
     def run(self) -> RegistrationResult:
-        """Run the current primary flow first, then selectively fall back to PR60 AnyAuto V2."""
+        """Run the anyauto V2 directly for native/abcard, or primary flow with fallback."""
+        if self.registration_entry_flow in {"native", "abcard"}:
+            self._log(f"检测到 {self.registration_entry_flow} 注册流程，全面启用 anyauto 引擎接管...", "info")
+            return self._run_anyauto_fallback(primary_error="Direct anyauto takeover for native/abcard")
+
         primary_result = self._run_primary_registration()
         if primary_result.success:
             return primary_result
