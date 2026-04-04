@@ -1,0 +1,22 @@
+services:
+  webui:
+    build: .
+    shm_size: "1gb"
+    container_name: codex-console-local-integration
+    ports:
+      - "16670:1455"
+      - "6082:6080"
+    environment:
+      - WEBUI_HOST=0.0.0.0
+      - WEBUI_PORT=1455
+      - DISPLAY=:99
+      - ENABLE_VNC=1
+      - VNC_PORT=5900
+      - NOVNC_PORT=6080
+      - DEBUG=0
+      - LOG_LEVEL=info
+      - WEBUI_ACCESS_PASSWORD=admin123
+    volumes:
+      - /tmp/codex-console-local-integration/data:/app/data
+      - /tmp/codex-console-local-integration/logs:/app/logs
+    restart: unless-stopped
