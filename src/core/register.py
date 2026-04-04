@@ -3113,6 +3113,7 @@ class RegistrationEngine:
         flow_engine = AnyAutoRegistrationEngine(
             email_service=self.email_service,
             proxy_url=self.proxy_url,
+
             callback_logger=self._log,
             max_retries=max_retries,
             browser_mode=browser_mode or "protocol",
