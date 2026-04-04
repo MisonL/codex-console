@@ -2548,7 +2548,7 @@ class RegistrationEngine:
                 "oai-device-id": resolved_did,
                 "OpenAI-Sentinel-Token": sentinel_header,
             }
-            if sentinel.session_observer_token:
+            if sentinel and getattr(sentinel, 'session_observer_token', None):
                 headers["OpenAI-Sentinel-SO-Token"] = sentinel.session_observer_token
 
             response = self.session.post(
