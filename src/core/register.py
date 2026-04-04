@@ -513,7 +513,16 @@ class RegistrationEngine:
     def _browser_sentinel_headless(self) -> bool:
         """决定是否使用无头模式获取 Sentinel 令牌。"""
         settings = get_settings()
-        return bool(getattr(settings, "registration_browser_sentinel_headless", True))
+        # 如果数据库明确设为 False，或者环境中有 DISPLAY 且数据库未强行设为 True
+        force_headless = getattr(settings, "registration_browser_sentinel_headless", None)
+        if force_headless is False:
+            return False
+        if force_headless is True:
+            return True
+        
+        # 智能判定：有显示环境则用有头模式（提高成功率）
+        has_display = bool(os.environ.get("DISPLAY"))
+        return not has_display
 
     def _current_browser_identity(self) -> tuple[str, str]:
         session_headers = getattr(self.session, "headers", None)

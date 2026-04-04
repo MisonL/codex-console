@@ -17,8 +17,8 @@ from .browser_bind import _find_chrome_binary, _wait_for_cloudflare, wait_for_cd
 
 logger = logging.getLogger(__name__)
 
-# 使用注册页面以获得正确的 Context 和 Origin
-_DEFAULT_PAGE_URL = "https://auth.openai.com/create-account/password"
+# 使用 robots.txt 页面以规避 Cloudflare 5s 盾，同时保持在正确的 Domain 下
+_DEFAULT_PAGE_URL = "https://sentinel.openai.com/robots.txt"
 
 class BrowserSentinelError(RuntimeError):
     """Raised when a browser-backed Sentinel token cannot be minted."""
@@ -303,11 +303,11 @@ def fetch_browser_sentinel_artifacts(
                 
                 page.set_default_timeout(max(30000, int(timeout_seconds) * 1000))
                 
-                # 如果是 Frame 页面，可能不需要 cf 检查，但保留逻辑以防万一
+                # 访问页面，优先 robots.txt
                 page.goto(str(page_url or _DEFAULT_PAGE_URL), wait_until="domcontentloaded", timeout=60000)
-                cf_ok, cf_note = _wait_for_cloudflare(page, max_wait_seconds=min(timeout_seconds, 90))
+                cf_ok, cf_note = _wait_for_cloudflare(page, max_wait_seconds=min(timeout_seconds, 30))
                 if not cf_ok:
-                    raise BrowserSentinelError(cf_note or "cloudflare challenge not passed")
+                    logger.warning("Cloudflare challenge not fully cleared, but will try to proceed: %s", cf_note)
 
                 payload = _evaluate_sentinel(
                     page,
