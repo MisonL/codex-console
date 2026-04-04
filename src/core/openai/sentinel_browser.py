@@ -17,7 +17,9 @@ from .browser_bind import _find_chrome_binary, _wait_for_cloudflare, wait_for_cd
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PAGE_URL = "https://auth.openai.com/create-account/password"
+# 使用 Frame 页面以减少干扰并提高成功率 (参考社区经验)
+_DEFAULT_PAGE_URL = "https://sentinel.openai.com/backend-api/sentinel/frame.html"
+
 class BrowserSentinelError(RuntimeError):
     """Raised when a browser-backed Sentinel token cannot be minted."""
 
@@ -35,7 +37,7 @@ def _infer_locale(accept_language: Optional[str]) -> str:
     text = str(accept_language or "").strip()
     if not text:
         return "en-US"
-    primary = text.split(",", 1)[0].split(";", 1)[0].strip()
+    primary = text.split(",", 1)[0].split("bit;")[0].strip()
     return primary or "en-US"
 
 
@@ -93,19 +95,21 @@ def _chrome_args(
 def _evaluate_sentinel(page, flow: str, include_session_observer: bool, include_passkey_capabilities: bool) -> dict:
     script = """
 async ({ flow, includeSessionObserver, includePasskeyCapabilities }) => {
+  console.log('SENTINEL_EVAL_START', { flow });
   const waitForSdk = async () => {
-    const deadline = Date.now() + 20000;
+    const deadline = Date.now() + 25000;
     while (Date.now() < deadline) {
       if (window.SentinelSDK && typeof window.SentinelSDK.token === 'function') {
         return window.SentinelSDK;
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
     throw new Error('SentinelSDK not ready');
   };
 
   const ensureSdk = async () => {
     if (window.SentinelSDK && typeof window.SentinelSDK.token === 'function') {
+      console.log('SDK_ALREADY_PRESENT');
       return window.SentinelSDK;
     }
     const existing = Array.from(document.scripts).find((item) => {
@@ -114,12 +118,13 @@ async ({ flow, includeSessionObserver, includePasskeyCapabilities }) => {
         || src.includes('sentinel.openai.com/sentinel/');
     });
     const src = existing && existing.src ? existing.src : 'https://sentinel.openai.com/backend-api/sentinel/sdk.js';
+    console.log('LOADING_SDK_FROM', src);
     await new Promise((resolve, reject) => {
       const tag = document.createElement('script');
       tag.src = src;
       tag.async = true;
-      tag.onload = resolve;
-      tag.onerror = () => reject(new Error('load sentinel sdk failed'));
+      tag.onload = () => { console.log('SDK_LOAD_ONLOAD'); resolve(); };
+      tag.onerror = () => { console.log('SDK_LOAD_ERROR'); reject(new Error('load sentinel sdk failed')); };
       document.head.appendChild(tag);
     });
     return waitForSdk();
@@ -134,7 +139,6 @@ async ({ flow, includeSessionObserver, includePasskeyCapabilities }) => {
         return await window.PublicKeyCredential.getClientCapabilities();
       }
     } catch (_error) {}
-
     const fallback = {};
     try {
       if (typeof window.PublicKeyCredential.isConditionalMediationAvailable === 'function') {
@@ -151,23 +155,41 @@ async ({ flow, includeSessionObserver, includePasskeyCapabilities }) => {
     return Object.keys(fallback).length ? fallback : null;
   };
 
-  const sdk = await ensureSdk();
-  if (typeof sdk.init === 'function') {
-    try {
-      await sdk.init(flow);
-    } catch (_error) {}
+  try {
+    const sdk = await ensureSdk();
+    console.log('SDK_READY');
+    
+    if (typeof sdk.init === 'function') {
+      console.log('CALLING_SDK_INIT', flow);
+      try {
+        await sdk.init(flow);
+        console.log('SDK_INIT_DONE');
+      } catch (err) {
+        console.log('SDK_INIT_FAILED', err.message);
+      }
+    }
+
+    console.log('CALLING_SDK_TOKEN', flow);
+    // 给 35 秒超时，因为 Turnstile 可能很慢
+    const token = await Promise.race([
+      sdk.token(flow),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Sentinel token timeout (JS)')), 35000)),
+    ]);
+    console.log('SDK_TOKEN_DONE', { tokenLength: (token || "").length });
+
+    const sessionObserverToken = includeSessionObserver && typeof sdk.sessionObserverToken === 'function'
+      ? await sdk.sessionObserverToken(flow)
+      : null;
+    if (sessionObserverToken) console.log('SESSION_OBSERVER_DONE');
+
+    const passkeyCapabilities = await getPasskeyCapabilities();
+    if (passkeyCapabilities) console.log('PASSKEY_CAPABILITIES_DONE');
+
+    return { token, sessionObserverToken, passkeyCapabilities };
+  } catch (err) {
+    console.log('EVALUATE_FATAL_ERROR', err.message);
+    throw err;
   }
-
-  const token = await Promise.race([
-    sdk.token(flow),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Sentinel token timeout')), 25000)),
-  ]);
-  const sessionObserverToken = includeSessionObserver && typeof sdk.sessionObserverToken === 'function'
-    ? await sdk.sessionObserverToken(flow)
-    : null;
-  const passkeyCapabilities = await getPasskeyCapabilities();
-
-  return { token, sessionObserverToken, passkeyCapabilities };
 }
 """
     return page.evaluate(
@@ -230,13 +252,30 @@ def fetch_browser_sentinel_artifacts(
                 locale=_infer_locale(accept_language),
             )
             try:
-                context.add_init_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-                )
+                # 增强的 Stealth 注入
+                context.add_init_script("""
+(() => {
+  const originalQuery = window.navigator.permissions.query;
+  window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications' ?
+      Promise.resolve({ state: Notification.permission }) :
+      originalQuery(parameters)
+  );
+  Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+  Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+  Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+  window.chrome = { runtime: {} };
+})();
+""")
                 context.add_cookies(_build_auth_cookie_items(device_id))
 
                 page = context.new_page()
+                page.on("console", lambda msg: logger.info("BROWSER_CONSOLE: %s", msg.text))
+                page.on("requestfailed", lambda request: logger.debug("BROWSER_REQ_FAILED: %s %s", request.url, request.failure))
+                
                 page.set_default_timeout(max(30000, int(timeout_seconds) * 1000))
+                
+                # 如果是 Frame 页面，可能不需要 cf 检查，但保留逻辑以防万一
                 page.goto(str(page_url or _DEFAULT_PAGE_URL), wait_until="domcontentloaded", timeout=60000)
                 cf_ok, cf_note = _wait_for_cloudflare(page, max_wait_seconds=min(timeout_seconds, 90))
                 if not cf_ok:
