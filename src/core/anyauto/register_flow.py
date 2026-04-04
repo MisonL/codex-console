@@ -309,6 +309,7 @@ class AnyAutoRegistrationEngine:
                     return {
                         "success": True,
                         "access_token": session_result.get("access_token", ""),
+                        "refresh_token": session_result.get("refresh_token", ""),
                         "session_token": session_result.get("session_token", ""),
                         "account_id": account_id,
                         "workspace_id": workspace_id,

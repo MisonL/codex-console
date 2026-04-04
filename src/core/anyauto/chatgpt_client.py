@@ -90,6 +90,7 @@ class ChatGPTClient:
         self.verbose = verbose
         self.browser_mode = browser_mode or "protocol"
         self.device_id = str(uuid.uuid4())
+        self.refresh_token = ""
         self.accept_language = random.choice([
             "en-US,en;q=0.9",
             "en-US,en;q=0.9,zh-CN;q=0.8",
@@ -329,6 +330,14 @@ class ChatGPTClient:
         """获取 ChatGPT next-auth 会话 Cookie。"""
         return self._get_cookie_value("__Secure-next-auth.session-token", "chatgpt.com")
 
+    def extract_refresh_token_from_cookies(self):
+        """从 Cookies 中尝试提取 refresh_token（支持 oaistb_rt_ 前缀）。"""
+        for cookie in self.session.cookies.jar:
+            val = str(cookie.value or "").strip()
+            if val.startswith("oaistb_rt_"):
+                return val
+        return ""
+
     def fetch_chatgpt_session(self):
         """请求 ChatGPT Session 接口并返回原始会话数据。"""
         url = f"{self.BASE}/api/auth/session"
@@ -381,6 +390,12 @@ class ChatGPTClient:
         if not session_cookie:
             return False, "缺少 __Secure-next-auth.session-token，注册回调可能未落地"
 
+        # 尝试从 Cookie 中补齐 refresh_token（针对新版 oaistb_rt_）
+        if not self.refresh_token:
+            self.refresh_token = self.extract_refresh_token_from_cookies()
+            if self.refresh_token:
+                self._log("从 Cookies 中提取到 refresh_token")
+
         self._log("步骤 3/4: 请求 ChatGPT /api/auth/session ...")
         ok, session_or_error = self.fetch_chatgpt_session()
         if not ok:
@@ -406,6 +421,7 @@ class ChatGPTClient:
 
         normalized = {
             "access_token": access_token,
+            "refresh_token": self.refresh_token,
             "session_token": session_token,
             "account_id": account_id,
             "user_id": user_id,
@@ -823,6 +839,13 @@ class ChatGPTClient:
                     data = r.json()
                 except Exception:
                     data = {}
+                
+                # 提取并保存 refresh_token
+                refresh_token = str(data.get("refresh_token") or "").strip()
+                if refresh_token:
+                    self.refresh_token = refresh_token
+                    self._log("create_account 返回 refresh_token，已缓存")
+
                 next_state = self._state_from_payload(data, current_url=str(r.url) or self.BASE)
                 self._log(f"账号创建成功 {describe_flow_state(next_state)}")
                 return (True, next_state) if return_state else (True, "账号创建成功")
