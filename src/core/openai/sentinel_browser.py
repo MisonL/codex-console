@@ -17,8 +17,8 @@ from .browser_bind import _find_chrome_binary, _wait_for_cloudflare, wait_for_cd
 
 logger = logging.getLogger(__name__)
 
-# 使用 sentinel 的 frame 页面，即便 404，它也是 HTML 上下文，Origin 正确
-_DEFAULT_PAGE_URL = "https://sentinel.openai.com/backend-api/sentinel/frame.html"
+# 使用主域名以获得 100% 正确的 Origin 和 Context
+_DEFAULT_PAGE_URL = "https://auth.openai.com/"
 
 class BrowserSentinelError(RuntimeError):
     """Raised when a browser-backed Sentinel token cannot be minted."""
@@ -228,9 +228,20 @@ def fetch_browser_sentinel_artifacts(
 ) -> BrowserSentinelArtifacts:
     """Use a real browser SDK execution path to mint Sentinel artifacts."""
 
-    # 预清理：防止残留进程导致 CDP 冲突
+    # 预清理：使用纯 Python 实现，防止残留进程导致 CDP 冲突
     try:
-        subprocess.run(["pkill", "-9", "-f", "codex-sentinel-"], stderr=subprocess.DEVNULL)
+        import os
+        import signal
+        # 寻找并清理残留的 Chrome 进程
+        if os.name != 'nt':
+            for pid in [p for p in os.listdir('/proc') if p.isdigit()]:
+                try:
+                    with open(os.path.join('/proc', pid, 'cmdline'), 'rb') as f:
+                        cmd = f.read().decode().replace('\x00', ' ')
+                        if 'codex-sentinel-' in cmd:
+                            os.kill(int(pid), signal.SIGKILL)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -333,9 +344,14 @@ def fetch_browser_sentinel_artifacts(
                 
                 page.set_default_timeout(max(30000, int(timeout_seconds) * 1000))
                 
-                # 访问页面，优先 robots.txt
-                page.goto(str(page_url or _DEFAULT_PAGE_URL), wait_until="domcontentloaded", timeout=60000)
-                cf_ok, cf_note = _wait_for_cloudflare(page, max_wait_seconds=min(timeout_seconds, 30))
+                # 访问页面
+                try:
+                    page.goto(str(page_url or _DEFAULT_PAGE_URL), wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    logger.warning("Initial page load timed out, retrying with networkidle...")
+                    page.goto(str(page_url or _DEFAULT_PAGE_URL), wait_until="networkidle", timeout=30000)
+                
+                cf_ok, cf_note = _wait_for_cloudflare(page, max_wait_seconds=min(timeout_seconds, 20))
                 if not cf_ok:
                     logger.warning("Cloudflare challenge not fully cleared, but will try to proceed: %s", cf_note)
 
