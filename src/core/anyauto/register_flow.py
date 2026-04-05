@@ -303,17 +303,45 @@ class AnyAutoRegistrationEngine:
                 self._log("步骤 2/2: 优先复用注册会话提取 ChatGPT Session / AccessToken...")
                 session_ok, session_result = chatgpt_client.reuse_session_and_get_tokens()
                 if session_ok:
-                    # 增强：如果没拿到 RT，尝试二次登录 (模仿 any-auto-register 核心逻辑)
+                    # 增强：如果没拿到 RT，使用原生库的 OAuth 登录流进行补全 (最稳妥方案)
                     has_rt = bool(chatgpt_client.refresh_token and str(chatgpt_client.refresh_token).strip())
                     if not has_rt:
-                        self._log(f"⚠️ 注册 Session 未包含 Refresh Token (当前值: '{chatgpt_client.refresh_token}')，启动二次登录补全...")
-                        relogin_ok = chatgpt_client.perform_secondary_login(self.email, self.password, skymail_adapter=skymail_adapter)
-                        if relogin_ok:
-                            self._log("🔥 二次登录补全 Refresh Token 成功！")
-                        else:
-                            self._log("二次登录补全失败，将仅使用 AccessToken 返回")
-                    else:
-                        self._log(f"检测到已持有 Refresh Token: {chatgpt_client.refresh_token[:15]}...")
+                        self._log("⚠️ 注册 Session 未包含 Refresh Token，启动原生 OAuth 补全流程...")
+                        try:
+                            from .oauth_client import OAuthClient
+                            # 1. 准备配置
+                            oauth_settings = {
+                                "oauth_issuer": str(getattr(settings, "openai_auth_url", "") or "https://auth.openai.com"),
+                                "oauth_client_id": str(getattr(settings, "openai_client_id", "") or "app_EMoamEEZ73f0CkXaXp7hrann"),
+                                "oauth_redirect_uri": str(getattr(settings, "openai_redirect_uri", "") or "http://localhost:1455/auth/callback"),
+                            }
+                            # 2. 实例化原生 OAuth 客户端
+                            oc = OAuthClient(
+                                config=oauth_settings,
+                                proxy=self.proxy_url,
+                                verbose=True,
+                                browser_mode=self.browser_mode
+                            )
+                            oc._log = self._log
+                            
+                            # 3. 执行完整的登录 & 令牌获取流程 (包含 OTP 自动处理)
+                            tokens = oc.login_and_get_tokens(
+                                email=self.email,
+                                password=self.password,
+                                device_id=chatgpt_client.device_id,
+                                user_agent=chatgpt_client.ua,
+                                sec_ch_ua=chatgpt_client.sec_ch_ua,
+                                impersonate=chatgpt_client.impersonate,
+                                skymail_client=skymail_adapter
+                            )
+                            
+                            if tokens and tokens.get("refresh_token"):
+                                chatgpt_client.refresh_token = tokens["refresh_token"]
+                                self._log(f"🔥 原生 OAuth 流程补全 RT 成功: {chatgpt_client.refresh_token[:15]}...")
+                            else:
+                                self._log("原生 OAuth 流程未捕获到 RT，将使用 AccessToken 返回")
+                        except Exception as e:
+                            self._log(f"原生 OAuth 补全尝试异常: {e}")
 
                     self._log("Token 提取完成！")
                     account_id = str(session_result.get("account_id", "") or "").strip()
