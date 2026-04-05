@@ -53,13 +53,19 @@ class SentinelTokenGenerator:
         return format(h, "08x")
 
     def _get_config(self):
-        """构造浏览器环境数据数组"""
+        """构造高拟人化的浏览器环境数据数组"""
         from datetime import datetime, timezone
         
-        screen_info = "1920x1080"
+        # 常见分辨率池
+        screens = ["1920x1080", "1440x900", "1536x864", "1366x768", "1280x720", "1600x900"]
+        screen_info = random.choice(screens)
+        
         now = datetime.now(timezone.utc)
         date_str = now.strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
-        js_heap_limit = 4294705152
+        
+        # 拟人化内存限制 (2GB - 8GB)
+        js_heap_limit = random.choice([2172649472, 4294705152, 2147483648])
+        
         nav_random1 = random.random()
         ua = self.user_agent
         script_src = "https://sentinel.openai.com/sentinel/20260124ceb8/sdk.js"
@@ -82,9 +88,11 @@ class SentinelTokenGenerator:
         
         doc_key = random.choice(["location", "implementation", "URL", "documentURI", "compatMode"])
         win_key = random.choice(["Object", "Function", "Array", "Number", "parseFloat", "undefined"])
-        perf_now = random.uniform(1000, 50000)
-        hardware_concurrency = random.choice([4, 8, 12, 16])
-        time_origin = time.time() * 1000 - perf_now
+        
+        # 拟人化性能计时器
+        perf_now = random.uniform(1000, 30000)
+        hardware_concurrency = random.choice([2, 4, 8])
+        time_origin = int(time.time() * 1000 - perf_now)
 
         config = [
             screen_info, date_str, js_heap_limit, nav_random1, ua,
