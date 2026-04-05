@@ -155,6 +155,8 @@ def fetch_sentinel_challenge(session, device_id, flow="authorize_continue", user
         "sec-ch-ua": sec_ch_ua or '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
+        "oai-did": device_id,
+        "X-OpenAI-Device-Id": device_id,
     }
 
     kwargs = {

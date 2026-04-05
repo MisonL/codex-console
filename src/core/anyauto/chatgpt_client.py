@@ -874,7 +874,14 @@ class ChatGPTClient:
             # 提供必要的 accept 参数以符合方法定义
             user_agent = self._headers(url, accept="application/json").get("user-agent", "")
             self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow=username_password_create")
-            sentinel_header = build_sentinel_token(self.session, self.device_id, flow="username_password_create", user_agent=user_agent)
+            sentinel_header = build_sentinel_token(
+                self.session, 
+                self.device_id, 
+                flow="username_password_create", 
+                user_agent=user_agent,
+                sec_ch_ua=self.sec_ch_ua,
+                impersonate=self.impersonate
+            )
             if sentinel_header:
                 self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
             else:
@@ -1058,7 +1065,14 @@ class ChatGPTClient:
             # 提供必要的 accept 参数以符合方法定义
             user_agent = self._headers(url, accept="application/json").get("user-agent", "")
             self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow=oauth_create_account")
-            sentinel_header = build_sentinel_token(self.session, self.device_id, flow="oauth_create_account", user_agent=user_agent)
+            sentinel_header = build_sentinel_token(
+                self.session, 
+                self.device_id, 
+                flow="oauth_create_account", 
+                user_agent=user_agent,
+                sec_ch_ua=self.sec_ch_ua,
+                impersonate=self.impersonate
+            )
             if sentinel_header:
                 self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
             else:
