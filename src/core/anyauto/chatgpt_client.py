@@ -129,6 +129,79 @@ class ChatGPTClient:
         if self.verbose:
             print(f"  {msg}")
 
+    def _sniff_refresh_token(self, response):
+        """
+        从响应中嗅探 refresh_token。
+        检查 Set-Cookie 头以及响应体。
+        """
+        url = str(response.url)
+        # 1. 检查 Set-Cookie (最优先，通常 RT 在这里)
+        # curl_cffi 会自动合并 set-cookie，我们也可以手动检查 headers
+        sc_headers = response.headers.get_list("Set-Cookie") if hasattr(response.headers, "get_list") else [response.headers.get("Set-Cookie", "")]
+        
+        # 调试：记录所有 Set-Cookie 头部和特定 URL 的响应体
+        debug_log = "/app/logs/cookie_sniffer.txt"
+        try:
+            import time
+            with open(debug_log, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] {url}\n")
+                for sc in sc_headers:
+                    if sc:
+                        f.write(f"  Cookie: {sc[:250]}\n")
+                
+                # 记录内存中的所有 Cookies (包括刚刚注入的)
+                for cookie in self.session.cookies.jar:
+                    val = str(cookie.value or "")
+                    if "oaistb" in val or "oaistb" in str(cookie.name):
+                        f.write(f"  🔥 MEMORY COOKIE: {cookie.name}={val[:100]}...\n")
+                        if val.startswith("oaistb_rt_"):
+                            self.refresh_token = val
+                            f.write(f"  🔥 AUTO CAPTURED RT: {val}\n")
+                
+                # 记录更多接口的响应体 (可能包含隐藏的 RT)
+                if any(x in url for x in ["/api/auth/", "auth.openai.com", "/api/v1/"]):
+                    try:
+                        content = response.text[:2000]
+                        f.write(f"  Body (Preview): {content}\n")
+                        # 特别记录 Header
+                        if "callback" in url:
+                            f.write(f"  FULL HEADERS: {dict(response.headers)}\n")
+                    except:
+                        pass
+        except Exception as e:
+            self._log(f"Debug log fail: {e}")
+
+        import re
+        for sc in sc_headers:
+            if not sc: continue
+            # 匹配 oaistb_rt_ 或者标准的 refresh-token
+            match = re.search(r'(oaistb_rt_[^;=\s\?]+)', sc)
+            if match:
+                self.refresh_token = match.group(1)
+                self._log(f"🔥 嗅探器从 Set-Cookie 捕获到 RT: {self.refresh_token[:15]}...")
+                try:
+                    with open(debug_log, "a", encoding="utf-8") as f:
+                        f.write(f"  🔥 SUCCESS CAPTURED: {self.refresh_token}\n")
+                except:
+                    pass
+                return
+
+        # 2. 检查响应体 JSON
+        try:
+            if "application/json" in response.headers.get("Content-Type", "").lower():
+                data = response.json()
+                rt = (
+                    data.get("refresh_token") 
+                    or data.get("refreshToken") 
+                    or (data.get("session") or {}).get("refresh_token")
+                )
+                if rt and str(rt).startswith("oaistb_rt_"):
+                    self.refresh_token = str(rt)
+                    self._log(f"🔥 嗅探器从 JSON 捕获到 RT: {self.refresh_token[:15]}...")
+                    return
+        except:
+            pass
+
     def _browser_pause(self, low=0.15, high=0.45):
         """在 headed 模式下加入轻微停顿，模拟有头浏览器节奏。"""
         if self.browser_mode == "headed":
@@ -295,9 +368,38 @@ class ChatGPTClient:
                     referer=referer,
                     navigation=True,
                 ),
-                allow_redirects=True,
+                allow_redirects=False, # 禁用自动跟随，手动追踪每一跳
                 timeout=30,
             )
+            
+            # 手动追踪重定向链，确保每一跳都能嗅探到 RT
+            max_hops = 10
+            for _ in range(max_hops):
+                self._sniff_refresh_token(r)
+                if r.status_code not in (301, 302, 303, 307, 308):
+                    break
+                
+                location = r.headers.get("Location")
+                if not location:
+                    break
+                
+                # 处理相对路径
+                from urllib.parse import urljoin
+                target_url = urljoin(str(r.url), location)
+                self._log(f"重定向跳转 -> {target_url}")
+                
+                r = self.session.get(
+                    target_url,
+                    headers=self._headers(
+                        target_url,
+                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        referer=str(r.url),
+                        navigation=True,
+                    ),
+                    allow_redirects=False,
+                    timeout=30,
+                )
+
             final_url = str(r.url)
             self._log(f"follow -> {r.status_code} {final_url}")
 
@@ -332,9 +434,20 @@ class ChatGPTClient:
 
     def extract_refresh_token_from_cookies(self):
         """从 Cookies 中尝试提取 refresh_token（支持 oaistb_rt_ 前缀）。"""
+        self._log(f"开始从 {len(self.session.cookies.jar)} 个 Cookies 中提取 refresh_token...")
         for cookie in self.session.cookies.jar:
+            name = str(cookie.name or "").lower()
             val = str(cookie.value or "").strip()
+            
+            # 日志：记录每个 cookie 的名称和值的前缀（脱敏）
+            display_val = f"{val[:12]}..." if len(val) > 12 else val
+            self._log(f"  Cookie: {cookie.name} = {display_val} (domain={cookie.domain})")
+            
             if val.startswith("oaistb_rt_"):
+                self._log(f"找到以 oaistb_rt_ 开头的 Cookie 值 (Name: {cookie.name})")
+                return val
+            if "refresh-token" in name or "refreshtoken" in name:
+                self._log(f"找到名称包含 refresh-token 的 Cookie: {cookie.name}")
                 return val
         return ""
 
@@ -342,6 +455,13 @@ class ChatGPTClient:
         """请求 ChatGPT Session 接口并返回原始会话数据。"""
         url = f"{self.BASE}/api/auth/session"
         self._browser_pause()
+        
+        # 增强：在请求 Session 接口时，注入 oai-did 头部 (这是获取 RT 的关键)
+        extra = {
+            "oai-did": self.device_id,
+            "X-OpenAI-Device-Id": self.device_id,
+        }
+        
         response = self.session.get(
             url,
             headers=self._headers(
@@ -349,31 +469,109 @@ class ChatGPTClient:
                 accept="application/json",
                 referer=f"{self.BASE}/",
                 fetch_site="same-origin",
+                extra_headers=extra
             ),
             timeout=30,
         )
+        self._sniff_refresh_token(response)
+        
         if response.status_code != 200:
             return False, f"/api/auth/session -> HTTP {response.status_code}"
 
         try:
             data = response.json()
+            # 记录接口返回的关键字段，用于调试
+            keys = list(data.keys())
+            self._log(f"/api/auth/session 响应字段: {keys}")
         except Exception as exc:
             return False, f"/api/auth/session 返回非 JSON: {exc}"
 
         access_token = str(data.get("accessToken") or "").strip()
         if not access_token:
             return False, "/api/auth/session 未返回 accessToken"
+            
+        # 核心：从 session 响应中提取 refreshToken (优先检查多个可能字段)
+        api_refresh_token = (
+            str(data.get("refreshToken") or "").strip()
+            or str(data.get("refresh_token") or "").strip()
+            or str((data.get("session") or {}).get("refresh_token") or "").strip()
+        )
+        
+        if api_refresh_token and "oaistb_rt_" in api_refresh_token:
+            self.refresh_token = api_refresh_token
+            self._log(f"🔥 成功从 /api/auth/session 提取到 RT: {self.refresh_token[:15]}...")
+            
         return True, data
+
+    def perform_secondary_login(self, email, password):
+        """
+        注册成功后执行二次登录，以获取持久化的 refresh_token。
+        """
+        self._log(f"--- 启动二次登录获取 RT: {email} ---")
+        
+        # 1. 重置会话 (必须复用 device_id 以维持信任链)
+        current_did = self.device_id
+        self._reset_session()
+        self.device_id = current_did
+        seed_oai_device_cookie(self.session, self.device_id)
+        
+        # 2. 依次执行登录流程
+        if not self.visit_homepage(): 
+            self._log("二次登录: 访问首页失败")
+            return False
+            
+        csrf = self.get_csrf_token()
+        if not csrf: return False
+        
+        auth_url = self.signin(email, csrf)
+        if not auth_url: return False
+        
+        # 跟随到密码输入页
+        success, state = self._follow_flow_state(FlowState(continue_url=auth_url))
+        if not success: return False
+        
+        # 3. 提交密码 (核心：模拟用户输入密码并点击登录)
+        self._log(f"二次登录: 正在提交密码验证...")
+        login_resp = self.session.post(
+            f"{self.AUTH}/api/accounts/login/password",
+            headers=self._headers(
+                f"{self.AUTH}/api/accounts/login/password",
+                accept="application/json",
+                referer=str(state.current_url),
+                content_type="application/json",
+                extra_headers={"oai-did": self.device_id}
+            ),
+            json={"username": email, "password": password},
+            timeout=30
+        )
+        
+        # 处理可能的验证码或重定向
+        if login_resp.status_code == 200:
+            next_data = login_resp.json()
+            next_state = self._state_from_payload(next_data, current_url=str(login_resp.url))
+            self._log(f"二次登录: 密码验证成功，跟随重定向: {next_state.page_type}")
+            self._follow_flow_state(next_state)
+        
+        # 4. 最终 Session 握手
+        self._log("二次登录: 正在通过 /api/auth/session 提取最终令牌...")
+        success, _ = self.fetch_chatgpt_session()
+        
+        if success and self.refresh_token:
+            self._log(f"🔥 黄金路径达成！二次登录成功捕获 RT: {self.refresh_token[:15]}...")
+            return True
+            
+        return False
 
     def reuse_session_and_get_tokens(self):
         """
         复用注册阶段已建立的 ChatGPT 会话，直接读取 Session / AccessToken。
-
-        Returns:
-            tuple[bool, dict|str]: 成功时返回标准化 token/session 数据；失败时返回错误信息。
         """
         state = self.last_registration_state or FlowState()
         self._log("步骤 1/4: 跟随注册回调 external_url ...")
+        
+        # 记录回调 URL 以便后续手动交换（如果自动跟随没抓到 RT）
+        callback_url = state.continue_url or state.current_url
+        
         if state.page_type == "external_url" or self._state_requires_navigation(state):
             ok, followed = self._follow_flow_state(
                 state,
@@ -384,6 +582,31 @@ class ChatGPTClient:
             self.last_registration_state = followed
         else:
             self._log("注册回调已落地，跳过额外跟随")
+
+        # 检查是否已经抓到 RT
+        if not self.refresh_token and callback_url and "code=" in callback_url:
+            self._log("⚠️ 自动跟随未捕获到 RT，尝试手动提取 code 进行 OAuth 交换...")
+            try:
+                from .oauth_client import OAuthClient
+                # 使用相同的 session 和指纹
+                oauth = OAuthClient(proxy=self.proxy, verbose=self.verbose)
+                oauth.session = self.session 
+                
+                # 尝试从 URL 提取 code
+                import urllib.parse
+                parsed = urllib.parse.urlparse(callback_url)
+                code = urllib.parse.parse_qs(parsed.query).get("code", [None])[0]
+                
+                if code:
+                    self._log(f"手动提取到 Code: {code[:15]}...")
+                    # 注意：这里需要 code_verifier，通常在 AnyAutoRegistrationEngine 中持有
+                    # 如果没有，尝试从 callback 记录中恢复
+                    res = oauth._exchange_code_for_tokens(code, verifier=None, user_agent=self.ua, impersonate=self.impersonate)
+                    if res and res.get("refresh_token"):
+                        self.refresh_token = res["refresh_token"]
+                        self._log("🔥 手动 OAuth 交换成功获取到 Refresh Token")
+            except Exception as e:
+                self._log(f"手动 OAuth 交换尝试失败: {e}")
 
         self._log("步骤 2/4: 检查 __Secure-next-auth.session-token ...")
         session_cookie = self.get_next_auth_session_token()
@@ -656,6 +879,7 @@ class ChatGPTClient:
         try:
             self._browser_pause()
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
+            self._sniff_refresh_token(r)
             
             if r.status_code == 200:
                 data = r.json()
@@ -744,6 +968,7 @@ class ChatGPTClient:
         try:
             self._browser_pause()
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
+            self._sniff_refresh_token(r)
             
             if r.status_code == 200:
                 try:
@@ -833,18 +1058,36 @@ class ChatGPTClient:
         try:
             self._browser_pause()
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
+            self._sniff_refresh_token(r)
             
             if r.status_code == 200:
                 try:
                     data = r.json()
+                    # 记录响应字段以便调试
+                    self._log(f"create_account 响应字段: {list(data.keys())}")
                 except Exception:
                     data = {}
                 
-                # 提取并保存 refresh_token
-                refresh_token = str(data.get("refresh_token") or "").strip()
+                # 尝试多种路径提取 refresh_token
+                refresh_token = (
+                    str(data.get("refresh_token") or "").strip()
+                    or str(data.get("refreshToken") or "").strip()
+                    or str((data.get("session") or {}).get("refresh_token") or "").strip()
+                )
+                
+                if not refresh_token:
+                    # 检查 Set-Cookie
+                    set_cookie = r.headers.get("Set-Cookie", "")
+                    if "oaistb_rt_" in set_cookie:
+                        import re
+                        match = re.search(r'(oaistb_rt_[^;=\s]+)', set_cookie)
+                        if match:
+                            refresh_token = match.group(1)
+                            self._log("从 create_account Set-Cookie 中提取到 refresh_token")
+
                 if refresh_token:
                     self.refresh_token = refresh_token
-                    self._log("create_account 返回 refresh_token，已缓存")
+                    self._log("create_account 已捕获 refresh_token")
 
                 next_state = self._state_from_payload(data, current_url=str(r.url) or self.BASE)
                 self._log(f"账号创建成功 {describe_flow_state(next_state)}")

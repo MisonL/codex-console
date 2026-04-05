@@ -77,9 +77,13 @@ class AnyAutoRegistrationEngine:
         self.session = None
         self.device_id: Optional[str] = None
 
-    def _log(self, message: str):
+    def _log(self, message: str, level: str = "info"):
         if self.callback_logger:
-            self.callback_logger(message)
+            # 兼容旧的回调接口
+            try:
+                self.callback_logger(message, level=level)
+            except TypeError:
+                self.callback_logger(message)
 
     @staticmethod
     def _build_password(length: int) -> str:
@@ -299,6 +303,15 @@ class AnyAutoRegistrationEngine:
                 self._log("步骤 2/2: 优先复用注册会话提取 ChatGPT Session / AccessToken...")
                 session_ok, session_result = chatgpt_client.reuse_session_and_get_tokens()
                 if session_ok:
+                    # 增强：如果没拿到 RT，尝试二次登录 (模仿 any-auto-register 核心逻辑)
+                    if not chatgpt_client.refresh_token:
+                        self._log("⚠️ 注册 Session 未包含 Refresh Token，启动二次登录补全...")
+                        relogin_ok = chatgpt_client.perform_secondary_login(self.email, self.password)
+                        if relogin_ok:
+                            self._log("🔥 二次登录补全 Refresh Token 成功！")
+                        else:
+                            self._log("二次登录补全失败，将仅使用 AccessToken 返回")
+
                     self._log("Token 提取完成！")
                     account_id = str(session_result.get("account_id", "") or "").strip()
                     if not account_id:
@@ -309,7 +322,7 @@ class AnyAutoRegistrationEngine:
                     return {
                         "success": True,
                         "access_token": session_result.get("access_token", ""),
-                        "refresh_token": session_result.get("refresh_token", ""),
+                        "refresh_token": chatgpt_client.refresh_token or session_result.get("refresh_token", ""),
                         "session_token": session_result.get("session_token", ""),
                         "account_id": account_id,
                         "workspace_id": workspace_id,
