@@ -41,7 +41,15 @@ class OAuthClient:
             browser_mode: protocol | headless | headed
         """
         self.config = dict(config or {})
-        self.oauth_issuer = self.config.get("oauth_issuer", "https://auth.openai.com")
+        raw_issuer = self.config.get("oauth_issuer", "https://auth.openai.com")
+        
+        # 统一规范化：oauth_issuer 仅保留根域名 (如 https://auth.openai.com)
+        # 这样在拼接 /api/accounts 或 /oauth/token 时不会出现路径嵌套 404
+        from urllib.parse import urlparse
+        parsed = urlparse(raw_issuer)
+        self.oauth_api_base = f"{parsed.scheme}://{parsed.netloc}"
+        self.oauth_issuer = self.oauth_api_base  # 全局统一使用根域名
+        
         self.oauth_client_id = self.config.get("oauth_client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
         self.oauth_redirect_uri = self.config.get("oauth_redirect_uri", "http://localhost:1455/auth/callback")
         self.proxy = proxy
@@ -472,7 +480,7 @@ class OAuthClient:
             self._set_error("无法获取 sentinel token (authorize_continue)")
             return None
 
-        request_url = f"{self.oauth_issuer}/api/accounts/authorize/continue"
+        request_url = f"{self.oauth_api_base}/api/accounts/authorize/continue"
         headers = self._headers(
             request_url,
             user_agent=user_agent,
@@ -576,7 +584,7 @@ class OAuthClient:
             self._set_error("无法获取 sentinel token (password_verify)")
             return None
 
-        request_url = f"{self.oauth_issuer}/api/accounts/password/verify"
+        request_url = f"{self.oauth_api_base}/api/accounts/password/verify"
         headers = self._headers(
             request_url,
             user_agent=user_agent,
@@ -1026,7 +1034,7 @@ class OAuthClient:
         self._log(f"选择 workspace: {workspace_id}")
         
         headers = self._headers(
-            f"{self.oauth_issuer}/api/accounts/workspace/select",
+            f"{self.oauth_api_base}/api/accounts/workspace/select",
             user_agent=user_agent,
             accept="application/json",
             referer=consent_url,
@@ -1051,7 +1059,7 @@ class OAuthClient:
 
             self._browser_pause()
             r = self.session.post(
-                f"{self.oauth_issuer}/api/accounts/workspace/select",
+                f"{self.oauth_api_base}/api/accounts/workspace/select",
                     **kwargs
             )
             
@@ -1090,7 +1098,7 @@ class OAuthClient:
                             
                             org_referer = continue_url if continue_url and continue_url.startswith("http") else consent_url
                             headers = self._headers(
-                                f"{self.oauth_issuer}/api/accounts/organization/select",
+                                f"{self.oauth_api_base}/api/accounts/organization/select",
                                 user_agent=user_agent,
                                 accept="application/json",
                                 referer=org_referer,
@@ -1114,7 +1122,7 @@ class OAuthClient:
 
                             self._browser_pause()
                             r_org = self.session.post(
-                                f"{self.oauth_issuer}/api/accounts/organization/select",
+                                f"{self.oauth_api_base}/api/accounts/organization/select",
                                 **kwargs
                             )
                             
@@ -1386,7 +1394,7 @@ class OAuthClient:
         return None
 
     def _send_email_otp(self, device_id, user_agent, sec_ch_ua, impersonate, referer=None):
-        request_url = f"{self.oauth_issuer}/api/accounts/email-otp/send"
+        request_url = f"{self.oauth_api_base}/api/accounts/email-otp/send"
         headers = self._headers(
             request_url,
             user_agent=user_agent,
@@ -1414,7 +1422,7 @@ class OAuthClient:
         return True, ""
 
     def _send_phone_number(self, phone, device_id, user_agent, sec_ch_ua, impersonate):
-        request_url = f"{self.oauth_issuer}/api/accounts/add-phone/send"
+        request_url = f"{self.oauth_api_base}/api/accounts/add-phone/send"
         headers = self._headers(
             request_url,
             user_agent=user_agent,
@@ -1457,7 +1465,7 @@ class OAuthClient:
         return True, next_state, ""
 
     def _resend_phone_otp(self, device_id, user_agent, sec_ch_ua, impersonate, state: FlowState):
-        request_url = f"{self.oauth_issuer}/api/accounts/phone-otp/resend"
+        request_url = f"{self.oauth_api_base}/api/accounts/phone-otp/resend"
         headers = self._headers(
             request_url,
             user_agent=user_agent,
@@ -1485,7 +1493,7 @@ class OAuthClient:
         return False, f"phone-otp/resend 失败: {resp.status_code} - {resp.text[:180]}"
 
     def _validate_phone_otp(self, code, device_id, user_agent, sec_ch_ua, impersonate, state: FlowState):
-        request_url = f"{self.oauth_issuer}/api/accounts/phone-otp/validate"
+        request_url = f"{self.oauth_api_base}/api/accounts/phone-otp/validate"
         headers = self._headers(
             request_url,
             user_agent=user_agent,
@@ -1540,7 +1548,7 @@ class OAuthClient:
         """处理 OAuth 阶段的邮箱 OTP 验证，返回服务端声明的下一步状态。"""
         self._log("步骤4: 检测到邮箱 OTP 验证")
 
-        request_url = f"{self.oauth_issuer}/api/accounts/email-otp/validate"
+        request_url = f"{self.oauth_api_base}/api/accounts/email-otp/validate"
         headers_otp = self._headers(
             request_url,
             user_agent=user_agent,

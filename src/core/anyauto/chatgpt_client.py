@@ -630,13 +630,15 @@ class ChatGPTClient:
                 parsed = urllib.parse.urlparse(callback_url)
                 code = urllib.parse.parse_qs(parsed.query).get("code", [None])[0]
                 
-                if code:
+                if code and self.last_code_verifier:
                     self._log(f"手动提取到 Code: {code[:15]}...")
                     # 使用注册阶段生成的 code_verifier 进行交换
                     res = oauth._exchange_code_for_tokens(code, code_verifier=self.last_code_verifier, user_agent=self.ua, impersonate=self.impersonate)
                     if res and res.get("refresh_token"):
                         self.refresh_token = res["refresh_token"]
                         self._log("🔥 手动 OAuth 交换成功获取到 Refresh Token")
+                elif code:
+                    self._log("提取到 Code 但缺少本地 Verifier，跳过手动交换")
             except Exception as e:
                 self._log(f"手动 OAuth 交换尝试失败: {e}")
 
@@ -752,13 +754,6 @@ class ChatGPTClient:
             str: authorize URL
         """
         self._log(f"提交邮箱: {email}")
-        
-        # 1. 生成 PKCE 并在本地保存
-        from .utils import generate_pkce
-        code_verifier, code_challenge = generate_pkce()
-        self.last_code_verifier = code_verifier
-        self._log(f"生成本地 PKCE Verifier: {code_verifier[:10]}...")
-
         url = f"{self.BASE}/api/auth/signin/openai"
         
         params = {
@@ -767,8 +762,6 @@ class ChatGPTClient:
             "auth_session_logging_id": str(uuid.uuid4()),
             "screen_hint": "login_or_signup",
             "login_hint": email,
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
         }
         
         form_data = {
