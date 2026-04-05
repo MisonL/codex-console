@@ -512,13 +512,21 @@ class ChatGPTClient:
             
         return True, data
 
-    def perform_secondary_login(self, email, password):
+    def perform_secondary_login(self, email, password, skymail_adapter=None):
         """
         注册成功后执行二次登录，以获取持久化的 refresh_token。
         """
         self._log(f"--- 启动二次登录获取 RT: {email} ---")
         
-        # 1. 访问登录入口
+        # 1. 彻底隔离会话 (但保留 device_id)
+        current_did = self.device_id
+        current_ua = self.ua
+        self._reset_session()
+        self.device_id = current_did
+        self.ua = current_ua
+        seed_oai_device_cookie(self.session, self.device_id)
+        
+        # 2. 访问登录入口
         login_url = f"{self.BASE}/auth/login"
         self._log(f"二次登录: 访问登录入口 {login_url} ...")
         try:
@@ -535,57 +543,68 @@ class ChatGPTClient:
         except Exception as e:
             self._log(f"二次登录: 访问登录入口异常: {e}")
             
-        # 2. 获取 CSRF Token
+        # 3. 获取 CSRF Token
         csrf = self.get_csrf_token()
         if not csrf:
             self._log("二次登录: 获取 CSRF 失败")
             return False
         
-        # 3. 发起 Signin 获取 authorize URL
+        # 4. 发起 Signin 获取 authorize URL
         auth_url = self.signin(email, csrf)
         if not auth_url:
             self._log("二次登录: Signin 失败")
             return False
         
-        # 4. 跟随状态机进入登录
+        # 5. 自适应状态机驱动
         success, state = self._follow_flow_state(FlowState(continue_url=auth_url))
         if not success:
-            self._log("二次登录: 跟随 authorize 失败")
+            self._log("二次登录: 初始跟随失败")
             return False
+            
+        # 循环推进状态机，直到进入落地页或报错
+        max_steps = 5
+        for step in range(max_steps):
+            page_type = state.page_type
+            self._log(f"二次登录状态机 Step {step+1}: {page_type}")
+            
+            if self._is_registration_complete_state(state):
+                self._log("二次登录: 已到达落地状态")
+                break
+                
+            if page_type == "login_password":
+                # 提交密码
+                self._log("二次登录: 正在提交密码验证...")
+                payload = {"username": email, "password": password}
+                r = self.session.post(
+                    f"{self.AUTH}/api/accounts/login/password",
+                    headers=self._headers(
+                        f"{self.AUTH}/api/accounts/login/password",
+                        accept="application/json",
+                        referer=str(state.current_url),
+                        content_type="application/json",
+                    ),
+                    json=payload,
+                    allow_redirects=False,
+                    timeout=30
+                )
+                self._sniff_refresh_token(r)
+                if r.status_code == 200:
+                    state = self._state_from_payload(r.json(), current_url=str(r.url))
+                elif r.status_code in (301, 302, 303, 307, 308):
+                    state = self._state_from_url(r.headers.get("Location"))
+                else:
+                    self._log(f"二次登录: 密码提交异常 (HTTP {r.status_code})")
+                    break
+            elif page_type == "email_otp_verification":
+                self._log("二次登录: 检测到需要邮箱验证，尝试跟随...")
+                success, state = self._follow_flow_state(state)
+                if not success: break
+            else:
+                # 通用跟随
+                success, state = self._follow_flow_state(state)
+                if not success: break
         
-        # 5. 提交密码 (核心：模拟用户输入密码并点击登录)
-        self._log(f"二次登录: 正在提交密码验证...")
-        login_resp = self.session.post(
-            f"{self.AUTH}/api/accounts/login/password",
-            headers=self._headers(
-                f"{self.AUTH}/api/accounts/login/password",
-                accept="application/json",
-                referer=str(state.current_url),
-                content_type="application/json",
-            ),
-            json={"username": email, "password": password},
-            allow_redirects=False,
-            timeout=30
-        )
-        
-        # 记录每一步的 Cookie
-        self._sniff_refresh_token(login_resp)
-        
-        # 处理可能的验证码或重定向
-        if login_resp.status_code == 200:
-            next_data = login_resp.json()
-            next_state = self._state_from_payload(next_data, current_url=str(login_resp.url))
-            self._log(f"二次登录: 密码验证成功，跟随下一步: {next_state.page_type}")
-            self._follow_flow_state(next_state)
-        elif login_resp.status_code in (301, 302, 303, 307, 308):
-            location = login_resp.headers.get("Location")
-            self._log(f"二次登录: 收到重定向 -> {location}")
-            next_state = self._state_from_url(location)
-            self._follow_flow_state(next_state)
-        else:
-            self._log(f"二次登录: 密码验证阶段异常 (Status: {login_resp.status_code})")
-        
-        # 4. 最终 Session 握手
+        # 6. 最终 Session 握手
         self._log("二次登录: 正在通过 /api/auth/session 提取最终令牌...")
         success, _ = self.fetch_chatgpt_session()
         

@@ -307,7 +307,7 @@ class AnyAutoRegistrationEngine:
                     has_rt = bool(chatgpt_client.refresh_token and str(chatgpt_client.refresh_token).strip())
                     if not has_rt:
                         self._log(f"⚠️ 注册 Session 未包含 Refresh Token (当前值: '{chatgpt_client.refresh_token}')，启动二次登录补全...")
-                        relogin_ok = chatgpt_client.perform_secondary_login(self.email, self.password)
+                        relogin_ok = chatgpt_client.perform_secondary_login(self.email, self.password, skymail_adapter=skymail_adapter)
                         if relogin_ok:
                             self._log("🔥 二次登录补全 Refresh Token 成功！")
                         else:
