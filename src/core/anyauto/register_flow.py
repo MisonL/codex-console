@@ -303,17 +303,18 @@ class AnyAutoRegistrationEngine:
                 self._log("步骤 2/2: 优先复用注册会话提取 ChatGPT Session / AccessToken...")
                 session_ok, session_result = chatgpt_client.reuse_session_and_get_tokens()
                 if session_ok:
-                    # 增强：如果没拿到 RT，使用原生库的 OAuth 登录流进行补全 (最稳妥方案)
+                    self._log(">>> [CODEX-VER-2026-04-05-A] 进入令牌提取阶段 <<<")
+                    # 强制使用原生库的 OAuth 登录流进行补全 (最稳妥方案)
                     has_rt = bool(chatgpt_client.refresh_token and str(chatgpt_client.refresh_token).strip())
                     if not has_rt:
-                        self._log("⚠️ 注册 Session 未包含 Refresh Token，启动原生 OAuth 补全流程...")
+                        self._log("🚀 关键补丁：检测到缺失 RT，启动原生 OAuthClient 深度提取流程...")
                         try:
                             from .oauth_client import OAuthClient
-                            # 1. 准备配置
+                            # 1. 准备配置 (对齐 auth.openai.com 规范)
                             oauth_settings = {
-                                "oauth_issuer": str(getattr(settings, "openai_auth_url", "") or "https://auth.openai.com"),
-                                "oauth_client_id": str(getattr(settings, "openai_client_id", "") or "app_EMoamEEZ73f0CkXaXp7hrann"),
-                                "oauth_redirect_uri": str(getattr(settings, "openai_redirect_uri", "") or "http://localhost:1455/auth/callback"),
+                                "oauth_issuer": "https://auth.openai.com",
+                                "oauth_client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+                                "oauth_redirect_uri": "http://localhost:1455/auth/callback",
                             }
                             # 2. 实例化原生 OAuth 客户端
                             oc = OAuthClient(
@@ -324,7 +325,19 @@ class AnyAutoRegistrationEngine:
                             )
                             oc._log = self._log
                             
-                            # 3. 执行完整的登录 & 令牌获取流程 (包含 OTP 自动处理)
+                            # 2.5 核心补丁：重置邮件获取的起始时间，确保只拿“新”验证码
+                            import time
+                            if skymail_adapter:
+                                if hasattr(skymail_adapter, "reset_start_time"):
+                                    skymail_adapter.reset_start_time()
+                                else:
+                                    self._log("💡 正在尝试重置 Skymail 获取时间戳...")
+                                    # 兼容性写法，确保不同版本的 adapter 都能识别
+                                    setattr(skymail_adapter, "_start_time", time.time())
+                                    setattr(skymail_adapter, "last_code", None)
+                            
+                            # 3. 执行完整的登录 & 令牌获取流程 (包含自动 OTP 获取)
+                            # 增加超时到 120 秒，应对 OpenAI 延迟
                             tokens = oc.login_and_get_tokens(
                                 email=self.email,
                                 password=self.password,
@@ -337,11 +350,13 @@ class AnyAutoRegistrationEngine:
                             
                             if tokens and tokens.get("refresh_token"):
                                 chatgpt_client.refresh_token = tokens["refresh_token"]
-                                self._log(f"🔥 原生 OAuth 流程补全 RT 成功: {chatgpt_client.refresh_token[:15]}...")
+                                self._log(f"🔥 [SUCCESS] 原生 OAuth 流程成功捕获 RT: {chatgpt_client.refresh_token[:20]}...")
                             else:
-                                self._log("原生 OAuth 流程未捕获到 RT，将使用 AccessToken 返回")
+                                self._log("❌ 原生 OAuth 流程未能捕获 RT，尝试返回现有 AccessToken")
                         except Exception as e:
-                            self._log(f"原生 OAuth 补全尝试异常: {e}")
+                            self._log(f"❌ 原生 OAuth 补全链路崩溃: {e}")
+                    else:
+                        self._log(f"✅ 已持有持久化 RT: {chatgpt_client.refresh_token[:20]}...")
 
                     self._log("Token 提取完成！")
                     account_id = str(session_result.get("account_id", "") or "").strip()
