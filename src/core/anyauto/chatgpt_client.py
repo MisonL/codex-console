@@ -80,7 +80,7 @@ class ChatGPTClient:
     def __init__(self, proxy=None, verbose=True, browser_mode="protocol"):
         """
         初始化 ChatGPT 客户端
-        
+
         Args:
             proxy: 代理地址
             verbose: 是否输出详细日志
@@ -90,8 +90,10 @@ class ChatGPTClient:
         self.verbose = verbose
         self.browser_mode = browser_mode or "protocol"
         self.device_id = str(uuid.uuid4())
-        self.refresh_token = ""
+        self.refresh_token = ""  # 初始化为空字符串
+        self.last_code_verifier = None # 保存 PKCE 验证码
         self.accept_language = random.choice([
+
             "en-US,en;q=0.9",
             "en-US,en;q=0.9,zh-CN;q=0.8",
             "en,en-US;q=0.9",
@@ -516,28 +518,42 @@ class ChatGPTClient:
         """
         self._log(f"--- 启动二次登录获取 RT: {email} ---")
         
-        # 1. 重置会话 (必须复用 device_id 以维持信任链)
-        current_did = self.device_id
-        self._reset_session()
-        self.device_id = current_did
-        seed_oai_device_cookie(self.session, self.device_id)
-        
-        # 2. 依次执行登录流程
-        if not self.visit_homepage(): 
-            self._log("二次登录: 访问首页失败")
-            return False
+        # 1. 访问登录入口
+        login_url = f"{self.BASE}/auth/login"
+        self._log(f"二次登录: 访问登录入口 {login_url} ...")
+        try:
+            r = self.session.get(
+                login_url,
+                headers=self._headers(
+                    login_url,
+                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    navigation=True,
+                ),
+                timeout=30,
+            )
+            self._sniff_refresh_token(r)
+        except Exception as e:
+            self._log(f"二次登录: 访问登录入口异常: {e}")
             
+        # 2. 获取 CSRF Token
         csrf = self.get_csrf_token()
-        if not csrf: return False
+        if not csrf:
+            self._log("二次登录: 获取 CSRF 失败")
+            return False
         
+        # 3. 发起 Signin 获取 authorize URL
         auth_url = self.signin(email, csrf)
-        if not auth_url: return False
+        if not auth_url:
+            self._log("二次登录: Signin 失败")
+            return False
         
-        # 跟随到密码输入页
+        # 4. 跟随状态机进入登录
         success, state = self._follow_flow_state(FlowState(continue_url=auth_url))
-        if not success: return False
+        if not success:
+            self._log("二次登录: 跟随 authorize 失败")
+            return False
         
-        # 3. 提交密码 (核心：模拟用户输入密码并点击登录)
+        # 5. 提交密码 (核心：模拟用户输入密码并点击登录)
         self._log(f"二次登录: 正在提交密码验证...")
         login_resp = self.session.post(
             f"{self.AUTH}/api/accounts/login/password",
@@ -616,9 +632,8 @@ class ChatGPTClient:
                 
                 if code:
                     self._log(f"手动提取到 Code: {code[:15]}...")
-                    # 注意：这里需要 code_verifier
-                    # 在 reuse 流程中如果没拿到 verifier，尝试从 session 恢复
-                    res = oauth._exchange_code_for_tokens(code, code_verifier=None, user_agent=self.ua, impersonate=self.impersonate)
+                    # 使用注册阶段生成的 code_verifier 进行交换
+                    res = oauth._exchange_code_for_tokens(code, code_verifier=self.last_code_verifier, user_agent=self.ua, impersonate=self.impersonate)
                     if res and res.get("refresh_token"):
                         self.refresh_token = res["refresh_token"]
                         self._log("🔥 手动 OAuth 交换成功获取到 Refresh Token")
@@ -626,6 +641,7 @@ class ChatGPTClient:
                 self._log(f"手动 OAuth 交换尝试失败: {e}")
 
         self._log("步骤 2/4: 检查 __Secure-next-auth.session-token ...")
+
         session_cookie = self.get_next_auth_session_token()
         if not session_cookie:
             return False, "缺少 __Secure-next-auth.session-token，注册回调可能未落地"
@@ -736,6 +752,13 @@ class ChatGPTClient:
             str: authorize URL
         """
         self._log(f"提交邮箱: {email}")
+        
+        # 1. 生成 PKCE 并在本地保存
+        from .utils import generate_pkce
+        code_verifier, code_challenge = generate_pkce()
+        self.last_code_verifier = code_verifier
+        self._log(f"生成本地 PKCE Verifier: {code_verifier[:10]}...")
+
         url = f"{self.BASE}/api/auth/signin/openai"
         
         params = {
@@ -744,6 +767,8 @@ class ChatGPTClient:
             "auth_session_logging_id": str(uuid.uuid4()),
             "screen_hint": "login_or_signup",
             "login_hint": email,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
         }
         
         form_data = {
