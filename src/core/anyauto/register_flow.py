@@ -304,13 +304,16 @@ class AnyAutoRegistrationEngine:
                 session_ok, session_result = chatgpt_client.reuse_session_and_get_tokens()
                 if session_ok:
                     # 增强：如果没拿到 RT，尝试二次登录 (模仿 any-auto-register 核心逻辑)
-                    if not chatgpt_client.refresh_token:
-                        self._log("⚠️ 注册 Session 未包含 Refresh Token，启动二次登录补全...")
+                    has_rt = bool(chatgpt_client.refresh_token and str(chatgpt_client.refresh_token).strip())
+                    if not has_rt:
+                        self._log(f"⚠️ 注册 Session 未包含 Refresh Token (当前值: '{chatgpt_client.refresh_token}')，启动二次登录补全...")
                         relogin_ok = chatgpt_client.perform_secondary_login(self.email, self.password)
                         if relogin_ok:
                             self._log("🔥 二次登录补全 Refresh Token 成功！")
                         else:
                             self._log("二次登录补全失败，将仅使用 AccessToken 返回")
+                    else:
+                        self._log(f"检测到已持有 Refresh Token: {chatgpt_client.refresh_token[:15]}...")
 
                     self._log("Token 提取完成！")
                     account_id = str(session_result.get("account_id", "") or "").strip()

@@ -221,6 +221,13 @@ class ChatGPTClient:
         fetch_site=None,
         extra_headers=None,
     ):
+        full_extra = {
+            "oai-did": self.device_id,
+            "X-OpenAI-Device-Id": self.device_id,
+        }
+        if extra_headers:
+            full_extra.update(extra_headers)
+            
         return build_browser_headers(
             url=url,
             user_agent=self.ua,
@@ -236,7 +243,7 @@ class ChatGPTClient:
             fetch_dest=fetch_dest,
             fetch_site=fetch_site,
             headed=self.browser_mode == "headed",
-            extra_headers=extra_headers,
+            extra_headers=full_extra,
         )
 
     def _reset_session(self):
@@ -539,18 +546,28 @@ class ChatGPTClient:
                 accept="application/json",
                 referer=str(state.current_url),
                 content_type="application/json",
-                extra_headers={"oai-did": self.device_id}
             ),
             json={"username": email, "password": password},
+            allow_redirects=False,
             timeout=30
         )
+        
+        # 记录每一步的 Cookie
+        self._sniff_refresh_token(login_resp)
         
         # 处理可能的验证码或重定向
         if login_resp.status_code == 200:
             next_data = login_resp.json()
             next_state = self._state_from_payload(next_data, current_url=str(login_resp.url))
-            self._log(f"二次登录: 密码验证成功，跟随重定向: {next_state.page_type}")
+            self._log(f"二次登录: 密码验证成功，跟随下一步: {next_state.page_type}")
             self._follow_flow_state(next_state)
+        elif login_resp.status_code in (301, 302, 303, 307, 308):
+            location = login_resp.headers.get("Location")
+            self._log(f"二次登录: 收到重定向 -> {location}")
+            next_state = self._state_from_url(location)
+            self._follow_flow_state(next_state)
+        else:
+            self._log(f"二次登录: 密码验证阶段异常 (Status: {login_resp.status_code})")
         
         # 4. 最终 Session 握手
         self._log("二次登录: 正在通过 /api/auth/session 提取最终令牌...")
@@ -589,7 +606,7 @@ class ChatGPTClient:
             try:
                 from .oauth_client import OAuthClient
                 # 使用相同的 session 和指纹
-                oauth = OAuthClient(proxy=self.proxy, verbose=self.verbose)
+                oauth = OAuthClient(config={}, proxy=self.proxy, verbose=self.verbose)
                 oauth.session = self.session 
                 
                 # 尝试从 URL 提取 code
@@ -599,9 +616,9 @@ class ChatGPTClient:
                 
                 if code:
                     self._log(f"手动提取到 Code: {code[:15]}...")
-                    # 注意：这里需要 code_verifier，通常在 AnyAutoRegistrationEngine 中持有
-                    # 如果没有，尝试从 callback 记录中恢复
-                    res = oauth._exchange_code_for_tokens(code, verifier=None, user_agent=self.ua, impersonate=self.impersonate)
+                    # 注意：这里需要 code_verifier
+                    # 在 reuse 流程中如果没拿到 verifier，尝试从 session 恢复
+                    res = oauth._exchange_code_for_tokens(code, code_verifier=None, user_agent=self.ua, impersonate=self.impersonate)
                     if res and res.get("refresh_token"):
                         self.refresh_token = res["refresh_token"]
                         self._log("🔥 手动 OAuth 交换成功获取到 Refresh Token")
