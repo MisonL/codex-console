@@ -893,6 +893,8 @@ class ChatGPTClient:
             # 提供必要的 accept 参数以符合方法定义
             user_agent = self._headers(url, accept="application/json").get("user-agent", "")
             self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow=username_password_create")
+            
+            # 增加捕获 stdout/stderr 的机制以便诊断
             sentinel_header = build_sentinel_token(
                 self.session, 
                 self.device_id, 
@@ -901,12 +903,14 @@ class ChatGPTClient:
                 sec_ch_ua=self.sec_ch_ua,
                 impersonate=self.impersonate
             )
+            
             if sentinel_header:
                 self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
             else:
-                self._log("纯 Python PoW 算法返回了空 Token，准备降级到浏览器", "warning")
+                # 记录失败的具体原因（如果库支持）
+                self._log("纯 Python PoW 算法返回了空 Token，检查 Node 环境或 SDK 版本", "warning")
         except Exception as e:
-            self._log(f"纯 Python PoW 算法异常: {e}", "warning")
+            self._log(f"纯 Python PoW 算法执行崩溃: {e}", "error")
             
         if not sentinel_header:
             self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")

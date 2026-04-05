@@ -18,6 +18,10 @@ async function readStdin() {
 }
 
 function setNavigator(window, payload) {
+  // 注入更完善的 Mock 以应对新的 SDK 检测
+  Object.defineProperty(window, "CanvasRenderingContext2D", { value: class {} });
+  Object.defineProperty(window, "WebGLRenderingContext", { value: class {} });
+  
   Object.defineProperty(window.navigator, "userAgent", {
     value: payload.user_agent,
     configurable: true,

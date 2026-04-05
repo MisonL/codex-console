@@ -8,10 +8,29 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 import requests
+import re
 
 logger = logging.getLogger(__name__)
 
-SENTINEL_VERSION = "20260219f9f6"
+def fetch_current_sentinel_version() -> str:
+    """从 ChatGPT 首页动态探测最新的 Sentinel SDK 版本"""
+    try:
+        # 探测首页以获取 sdk.js 链接
+        resp = requests.get("https://chatgpt.com/", timeout=10)
+        if resp.status_code == 200:
+            # 匹配类似 https://sentinel.openai.com/sentinel/20260219f9f6/sdk.js
+            match = re.search(r"sentinel/([a-f0-9]+)/sdk\.js", resp.text)
+            if match:
+                version = match.group(1)
+                logger.info(f"探测到最新 Sentinel 版本: {version}")
+                return version
+    except Exception as e:
+        logger.warning(f"动态版本探测失败: {e}")
+    
+    # 默认兜底版本
+    return "20260219f9f6"
+
+SENTINEL_VERSION = fetch_current_sentinel_version()
 SENTINEL_SDK_URL = f"https://sentinel.openai.com/sentinel/{SENTINEL_VERSION}/sdk.js"
 SENTINEL_REQ_URL = "https://sentinel.openai.com/backend-api/sentinel/req"
 
