@@ -891,16 +891,23 @@ class ChatGPTClient:
             sentinel_header = sentinel.token if sentinel else "{}"
             self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel)}")
 
+        # 尝试获取当前的完整 URL 以补全 Referer
+        current_referer = f"{self.AUTH}/create-account/password"
+        state = self.last_registration_state
+        if state and state.current_url and "create-account/password" in state.current_url:
+            current_referer = state.current_url
+
         headers = self._headers(
             url,
             accept="application/json",
-            referer=f"{self.AUTH}/create-account/password",
+            referer=current_referer,
             origin=self.AUTH,
             content_type="application/json",
             fetch_site="same-origin",
             extra_headers={
                 "oai-device-id": self.device_id,
-                "OpenAI-Sentinel-Token": sentinel_header,
+                "OpenAI-Device-Id": self.device_id,
+                "openai-sentinel-token": sentinel_header,
             },
         )
 
