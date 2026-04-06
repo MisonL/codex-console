@@ -1385,7 +1385,7 @@ class OAuthClient:
             
             if r.status_code == 200:
                 data = r.json()
-                self._sniff_refresh_token(r)
+                # 移除不存在的 self._sniff_refresh_token(r)
                 return data
             else:
                 try:
