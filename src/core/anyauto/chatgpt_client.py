@@ -1358,6 +1358,10 @@ class ChatGPTClient:
                 return False, f"收码或校验超时 ({max_total_wait}s)"
 
             if self._state_is_about_you(state):
+                if getattr(self, "stop_before_about_you_submission", False):
+                    self._log("🔥 [CODEX] 命中 interrupt 流程：在提交 about_you 前停止，准备移交 OAuth 登录流承接...")
+                    return True, state
+                
                 if account_created:
                     return False, "填写信息阶段重复进入"
                 success, next_state = self.create_account(
