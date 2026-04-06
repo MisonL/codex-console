@@ -839,10 +839,14 @@ class ChatGPTClient:
         parsed = urllib.parse.urlparse(url)
         query = urllib.parse.parse_qs(parsed.query)
         
+        # 保存原始的 client_id 和 redirect_uri，供后续换码使用
+        self.last_oauth_client_id = query.get("client_id", [None])[0]
+        self.last_oauth_redirect_uri = query.get("redirect_uri", [None])[0]
+        
         # 核心：如果我们能生成自己的挑战码，就替换掉它
         code_verifier, code_challenge = generate_pkce()
         self.last_code_verifier = code_verifier
-        self._log(f"🔥 [CODEX] 正在拦截 Authorize URL 并注入自定义 PKCE 挑战码...")
+        self._log(f"🔥 [CODEX] 正在拦截 Authorize URL (ClientID: {self.last_oauth_client_id}) 并注入自定义 PKCE...")
         
         query["code_challenge"] = [code_challenge]
         query["code_challenge_method"] = ["S256"]
