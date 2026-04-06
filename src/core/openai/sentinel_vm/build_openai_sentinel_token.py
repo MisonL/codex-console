@@ -68,17 +68,33 @@ def ensure_sdk_file() -> Path:
 
 
 def node_environment(device_id: str, user_agent: str) -> dict:
+    import random
+    import time
+
+    # 拟人化分辨率池
+    screens = [
+        (1920, 1080), (2560, 1440), (1440, 900), (1536, 864), (1366, 768), (1280, 720)
+    ]
+    sw, sh = random.choice(screens)
+    
+    # 拟人化内存池 (2GB - 16GB)
+    memories = [2147483648, 4294967296, 8589934592, 17179869184]
+    mem = random.choice(memories)
+    
+    # 拟人化并发数 (2, 4, 8, 12, 16)
+    concurrency = random.choice([2, 4, 8, 12, 16])
+
     return {
         "device_id": device_id,
         "user_agent": user_agent,
-        "language": "zh-CN",
-        "languages": ["zh-CN", "zh"],
-        "hardware_concurrency": 12,
-        "screen_width": 1366,
-        "screen_height": 768,
-        "performance_now": 12345.67,
-        "time_origin": 1710000000000.0,
-        "js_heap_size_limit": 4294967296,
+        "language": "en-US",
+        "languages": ["en-US", "en"],
+        "hardware_concurrency": concurrency,
+        "screen_width": sw,
+        "screen_height": sh,
+        "performance_now": round(random.uniform(500, 3000), 2),
+        "time_origin": time.time() * 1000 - random.uniform(1000, 5000),
+        "js_heap_size_limit": mem,
     }
 
 

@@ -650,14 +650,25 @@ class ChatGPTClient:
                 code = urllib.parse.parse_qs(parsed.query).get("code", [None])[0]
                 
                 if code and self.last_code_verifier:
-                    self._log(f"手动提取到 Code: {code[:15]}...")
+                    self._log(f"🔥 手动提取到 Code: {code[:15]}... 正在利用 PKCE Verifier 强制换码")
+                    # 准备正确的 OAuth 配置
+                    config = {
+                        "oauth_issuer": "https://auth.openai.com",
+                        "oauth_client_id": self.client_id or "app_EMoamEEZ73f0CkXaXp7hrann",
+                        "oauth_redirect_uri": self.redirect_uri or f"{self.BASE}/api/auth/callback/openai",
+                    }
+                    oauth = OAuthClient(config=config, proxy=self.proxy, verbose=True)
+                    oauth.session = self.session # 复用同一个 Session 以维持指纹一致性
+                    
                     # 使用注册阶段生成的 code_verifier 进行交换
                     res = oauth._exchange_code_for_tokens(code, code_verifier=self.last_code_verifier, user_agent=self.ua, impersonate=self.impersonate)
                     if res and res.get("refresh_token"):
                         self.refresh_token = res["refresh_token"]
-                        self._log("🔥 手动 OAuth 交换成功获取到 Refresh Token")
+                        self._log(f"🔥 [SUCCESS] 手动 OAuth 交换成功获取到 RT: {self.refresh_token[:20]}...")
+                    else:
+                        self._log("⚠️ 手动交换未获取到 RT，可能账号已被标记 add_phone 或环境受阻")
                 elif code:
-                    self._log("提取到 Code 但缺少本地 Verifier，跳过手动交换")
+                    self._log("⚠️ 提取到 Code 但缺少本地 Verifier，这通常是因为 signin 阶段注入失败")
             except Exception as e:
                 self._log(f"手动 OAuth 交换尝试失败: {e}")
 
