@@ -1384,9 +1384,18 @@ class OAuthClient:
             r = self.session.post(url, **kwargs)
             
             if r.status_code == 200:
-                return r.json()
+                data = r.json()
+                self._sniff_refresh_token(r)
+                return data
             else:
-                self._set_error(f"换取 tokens 失败: {r.status_code} - {r.text[:200]}")
+                try:
+                    error_data = r.json()
+                    err_msg = f"{r.status_code} | Error: {error_data.get('error')} | Msg: {error_data.get('error_description')}"
+                    print(f"🔥 [CODEX-OAUTH-FAIL] {err_msg}")
+                    self._set_error(f"换取 tokens 失败: {err_msg}")
+                except:
+                    print(f"🔥 [CODEX-OAUTH-FAIL] {r.status_code} | {r.text[:200]}")
+                    self._set_error(f"换取 tokens 失败: {r.status_code} - {r.text[:200]}")
                 
         except Exception as e:
             self._set_error(f"换取 tokens 异常: {e}")
