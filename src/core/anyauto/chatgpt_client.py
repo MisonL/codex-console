@@ -1278,26 +1278,51 @@ class ChatGPTClient:
                 continue
 
             if self._state_is_email_otp(state):
-                self._log("等待邮箱验证码...")
-                otp_code = skymail_client.wait_for_verification_code(email, timeout=90)
+                self._log("进入收码阶段，总等待时间 300s，每 90s 自动重试发送...")
+                
+                # 重置收码起始时间，确保过滤掉旧邮件
+                if hasattr(skymail_client, "reset_start_time"):
+                    skymail_client.reset_start_time()
+                
+                otp_code = None
+                max_total_wait = 300  # 延长到 5 分钟
+                resend_interval = 90  # 90 秒重发一次
+                start_wait_time = time.time()
+                
+                while time.time() - start_wait_time < max_total_wait:
+                    # 尝试收码
+                    otp_code = skymail_client.wait_for_verification_code(email, timeout=resend_interval)
+                    if otp_code:
+                        break
+                    
+                    # 超时未收到，触发重发
+                    self._log(f"已等待 {int(time.time() - start_wait_time)}s 未收到验证码，尝试重发 (Resend OTP)...")
+                    if not self.send_email_otp():
+                        self._log("重发接口返回失败，可能频率受限，继续等待...")
+                
                 if not otp_code:
-                    return False, "未收到验证码"
+                    return False, f"收码超时 ({max_total_wait}s)，请检查邮箱网关延迟或更换节点"
 
+                self._log(f"成功获取验证码: {otp_code}")
                 tried_codes = {otp_code}
-                for _ in range(3):
+                for code_attempt in range(3):
                     success, next_state = self.verify_email_otp(otp_code, return_state=True)
                     if success:
                         otp_verified = True
                         state = next_state
                         self.last_registration_state = state
                         break
-
-                    err_text = str(next_state or "")
-                    is_wrong_code = any(
-                        marker in err_text.lower()
-                        for marker in (
-                            "wrong_email_otp_code",
-                            "wrong code",
+                    
+                    self._log(f"验证码 {otp_code} 验证失败，可能已过期或由于延迟被覆盖，尝试重新收码...")
+                    # 如果验证失败且还有时间，重新从邮箱捞一个最新的码
+                    otp_code = skymail_client.wait_for_verification_code(email, timeout=20)
+                    if not otp_code or otp_code in tried_codes:
+                        return False, "验证码无效且未发现新码"
+                    tried_codes.add(otp_code)
+                
+                if otp_verified:
+                    continue
+                return False, "验证码校验失败"
                             "http 401",
                         )
                     )
