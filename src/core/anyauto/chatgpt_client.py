@@ -651,12 +651,16 @@ class ChatGPTClient:
                 
                 if code and self.last_code_verifier:
                     self._log(f"🔥 手动提取到 Code: {code[:15]}... 正在利用 PKCE Verifier 强制换码")
-                    # 准备正确的 OAuth 配置
+                    # 准备正确的 OAuth 配置 (OpenAI Web App 默认值)
+                    client_id = getattr(self, "client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
+                    redirect_uri = getattr(self, "redirect_uri", f"{self.BASE}/api/auth/callback/openai")
+                    
                     config = {
                         "oauth_issuer": "https://auth.openai.com",
-                        "oauth_client_id": self.client_id or "app_EMoamEEZ73f0CkXaXp7hrann",
-                        "oauth_redirect_uri": self.redirect_uri or f"{self.BASE}/api/auth/callback/openai",
+                        "oauth_client_id": client_id,
+                        "oauth_redirect_uri": redirect_uri,
                     }
+                    from .oauth_client import OAuthClient
                     oauth = OAuthClient(config=config, proxy=self.proxy, verbose=True)
                     oauth.session = self.session # 复用同一个 Session 以维持指纹一致性
                     
