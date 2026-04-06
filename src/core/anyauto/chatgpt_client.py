@@ -651,9 +651,12 @@ class ChatGPTClient:
                 
                 if code and self.last_code_verifier:
                     self._log(f"🔥 手动提取到 Code: {code[:15]}... 正在利用 PKCE Verifier 强制换码")
-                    # 准备正确的 OAuth 配置 (OpenAI Web App 默认值)
-                    client_id = getattr(self, "client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
-                    redirect_uri = getattr(self, "redirect_uri", f"{self.BASE}/api/auth/callback/openai")
+                    
+                    # 准备正确的 OAuth 配置 (使用拦截到的原始值，这至关重要)
+                    client_id = getattr(self, "last_oauth_client_id", None) or getattr(self, "client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
+                    redirect_uri = getattr(self, "last_oauth_redirect_uri", None) or getattr(self, "redirect_uri", f"{self.BASE}/api/auth/callback/openai")
+                    
+                    self._log(f"🔥 OAuth 换码参数: client_id={client_id}, redirect_uri={redirect_uri}")
                     
                     config = {
                         "oauth_issuer": "https://auth.openai.com",
@@ -665,7 +668,16 @@ class ChatGPTClient:
                     oauth.session = self.session # 复用同一个 Session 以维持指纹一致性
                     
                     # 使用注册阶段生成的 code_verifier 进行交换
-                    res = oauth._exchange_code_for_tokens(code, code_verifier=self.last_code_verifier, user_agent=self.ua, impersonate=self.impersonate)
+                    # 我们需要捕获这里的原始响应以进行诊断
+                    try:
+                        res = oauth._exchange_code_for_tokens(code, code_verifier=self.last_code_verifier, user_agent=self.ua, impersonate=self.impersonate)
+                        if res and res.get("refresh_token"):
+                            self.refresh_token = res["refresh_token"]
+                            self._log(f"🔥 [SUCCESS] 手动 OAuth 交换成功获取到 RT: {self.refresh_token[:15]}...")
+                        else:
+                            self._log(f"⚠️ 手动交换未获取到 RT。OpenAI 原始响应: {res}")
+                    except Exception as e:
+                        self._log(f"❌ 手动交换过程崩溃: {e}")
                     if res and res.get("refresh_token"):
                         self.refresh_token = res["refresh_token"]
                         self._log(f"🔥 [SUCCESS] 手动 OAuth 交换成功获取到 RT: {self.refresh_token[:20]}...")
