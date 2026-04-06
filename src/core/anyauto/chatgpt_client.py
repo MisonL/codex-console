@@ -827,12 +827,28 @@ class ChatGPTClient:
     
     def authorize(self, url, max_retries=3):
         """
-        访问 authorize URL，跟随重定向（带重试机制）
-        这是关键步骤，建立 auth.openai.com 的 session
-        
-        Returns:
-            str: 最终重定向的 URL
+        访问 authorize URL，并强制注入我们控制的 PKCE 挑战码
         """
+        import urllib.parse
+        from .oauth_client import generate_pkce
+        
+        parsed = urllib.parse.urlparse(url)
+        query = urllib.parse.parse_qs(parsed.query)
+        
+        # 核心：如果我们能生成自己的挑战码，就替换掉它
+        code_verifier, code_challenge = generate_pkce()
+        self.last_code_verifier = code_verifier
+        self._log(f"🔥 [CODEX] 正在拦截 Authorize URL 并注入自定义 PKCE 挑战码...")
+        
+        query["code_challenge"] = [code_challenge]
+        query["code_challenge_method"] = ["S256"]
+        
+        # 重组 URL
+        new_query = urllib.parse.urlencode(query, doseq=True)
+        new_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
+        
+        url = new_url # 使用拦截后的新 URL
+
         for attempt in range(max_retries):
             try:
                 if attempt > 0:
