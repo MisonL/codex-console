@@ -767,13 +767,15 @@ class ChatGPTClient:
     
     def signin(self, email, csrf_token):
         """
-        提交邮箱，获取 authorize URL
-        
-        Returns:
-            str: authorize URL
+        提交邮箱，并注入 PKCE 验证码
         """
-        self._log(f"提交邮箱: {email}")
+        self._log(f"提交邮箱并注入 PKCE: {email}")
         url = f"{self.BASE}/api/auth/signin/openai"
+        
+        # 核心：生成并保存我们自己的 PKCE 验证码
+        from .oauth_client import generate_pkce
+        code_verifier, code_challenge = generate_pkce()
+        self.last_code_verifier = code_verifier
         
         params = {
             "prompt": "login",
@@ -783,10 +785,13 @@ class ChatGPTClient:
             "login_hint": email,
         }
         
+        # 强制注入 code_challenge
         form_data = {
             "callbackUrl": f"{self.BASE}/",
             "csrfToken": csrf_token,
             "json": "true",
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
         }
 
         try:
