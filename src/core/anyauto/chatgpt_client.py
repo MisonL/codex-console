@@ -1344,7 +1344,8 @@ class ChatGPTClient:
                             otp_verified = True
                             state = next_state
                             self.last_registration_state = state
-                            break
+                            self._log("🔥 [CODEX] 邮件 OTP 验证成功，立即中断注册流以切换至稳定 OAuth 承接逻辑...")
+                            return True, "otp_verified_interrupted"
                         else:
                             self._log(f"验证码 {otp_code} 验证失败，可能由于延迟导致码失效，继续收新码...")
                             tried_codes.add(otp_code)
