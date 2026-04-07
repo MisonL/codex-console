@@ -270,6 +270,8 @@ class AnyAutoRegistrationEngine:
                     return {"success": False, "error_message": last_error}
 
                 add_phone_required = "add_phone" in str(msg or "").lower()
+                interrupted_for_reauth = "otp_verified_interrupted" in str(msg or "").lower()
+                
                 try:
                     state = getattr(chatgpt_client, "last_registration_state", None)
                     if state:
@@ -283,7 +285,12 @@ class AnyAutoRegistrationEngine:
                 self.session = chatgpt_client.session
                 self.device_id = chatgpt_client.device_id
 
-                if add_phone_required:
+                if add_phone_required or interrupted_for_reauth:
+                    if interrupted_for_reauth:
+                        self._log("🔥 [CODEX] 捕获到注册中断信号，立即启动 Passwordless OAuth 接力流程...")
+                    else:
+                        self._log("检测到账号需要手机号验证，尝试通过 Passwordless OAuth 补全流程...")
+                        
                     pwdless = self._passwordless_oauth_reauth(
                         chatgpt_client,
                         normalized_email,
