@@ -1358,13 +1358,6 @@ class ChatGPTClient:
                     continue
                 return False, f"收码或校验超时 ({max_total_wait}s)"
 
-            if self._state_is_about_you(state):
-                if getattr(self, "stop_before_about_you_submission", False):
-                    self._log("🔥 [CODEX] 命中 interrupt 流程：在提交 about_you 前停止，准备移交 OAuth 登录流承接...")
-                    return True, state
-                
-                if account_created:
-                    return False, "填写信息阶段重复进入"
                 success, next_state = self.create_account(
                     first_name,
                     last_name,
@@ -1373,9 +1366,16 @@ class ChatGPTClient:
                 )
                 if not success:
                     return False, f"创建账号失败: {next_state}"
+                
                 account_created = True
                 state = next_state
                 self.last_registration_state = state
+                
+                # 在资料提交成功后中断，这才是“黄金路径”的中断点
+                if getattr(self, "stop_before_about_you_submission", False):
+                    self._log("🔥 [CODEX] 账号资料(姓名+生日)已强推成功，命中黄金中断点，准备二次重登接力...")
+                    return True, "otp_verified_interrupted"
+                
                 continue
 
             if self._state_is_add_phone(state):
