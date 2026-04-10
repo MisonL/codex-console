@@ -39,20 +39,16 @@ async def task_websocket(websocket: WebSocket, task_uuid: str):
         # 发送当前状态
         status = task_manager.get_status(task_uuid)
         if status:
-            await websocket.send_json({
-                "type": "status",
-                "task_uuid": task_uuid,
-                **status
-            })
+            await websocket.send_json(
+                {"type": "status", "task_uuid": task_uuid, **status}
+            )
 
         # 发送历史日志（只发送注册时已存在的日志，避免与实时推送重复）
         history_logs = task_manager.get_unsent_logs(task_uuid, websocket)
         for log in history_logs:
-            await websocket.send_json({
-                "type": "log",
-                "task_uuid": task_uuid,
-                "message": log
-            })
+            await websocket.send_json(
+                {"type": "log", "task_uuid": task_uuid, "message": log}
+            )
 
         # 保持连接，等待客户端消息
         while True:
@@ -61,7 +57,7 @@ async def task_websocket(websocket: WebSocket, task_uuid: str):
                 # 而是发送心跳检测
                 data = await asyncio.wait_for(
                     websocket.receive_json(),
-                    timeout=30.0  # 30秒超时
+                    timeout=30.0,  # 30秒超时
                 )
 
                 # 处理心跳
@@ -71,12 +67,14 @@ async def task_websocket(websocket: WebSocket, task_uuid: str):
                 # 处理取消请求
                 elif data.get("type") == "cancel":
                     task_manager.cancel_task(task_uuid)
-                    await websocket.send_json({
-                        "type": "status",
-                        "task_uuid": task_uuid,
-                        "status": "cancelling",
-                        "message": "取消请求已提交，正在踩刹车，别慌"
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "status",
+                            "task_uuid": task_uuid,
+                            "status": "cancelling",
+                            "message": "取消请求已提交，正在踩刹车，别慌",
+                        }
+                    )
 
             except asyncio.TimeoutError:
                 # 超时，发送心跳检测
@@ -124,28 +122,21 @@ async def batch_websocket(websocket: WebSocket, batch_id: str):
         # 发送当前状态
         status = task_manager.get_batch_status(batch_id)
         if status:
-            await websocket.send_json({
-                "type": "status",
-                "batch_id": batch_id,
-                **status
-            })
+            await websocket.send_json(
+                {"type": "status", "batch_id": batch_id, **status}
+            )
 
         # 发送历史日志（只发送注册时已存在的日志，避免与实时推送重复）
         history_logs = task_manager.get_unsent_batch_logs(batch_id, websocket)
         for log in history_logs:
-            await websocket.send_json({
-                "type": "log",
-                "batch_id": batch_id,
-                "message": log
-            })
+            await websocket.send_json(
+                {"type": "log", "batch_id": batch_id, "message": log}
+            )
 
         # 保持连接，等待客户端消息
         while True:
             try:
-                data = await asyncio.wait_for(
-                    websocket.receive_json(),
-                    timeout=30.0
-                )
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
 
                 # 处理心跳
                 if data.get("type") == "ping":
@@ -154,12 +145,22 @@ async def batch_websocket(websocket: WebSocket, batch_id: str):
                 # 处理取消请求
                 elif data.get("type") == "cancel":
                     task_manager.cancel_batch(batch_id)
-                    await websocket.send_json({
-                        "type": "status",
-                        "batch_id": batch_id,
-                        "status": "cancelling",
-                        "message": "取消请求已提交，正在让整队缓缓靠边停车"
-                    })
+                    try:
+                        from .registration import _cancel_batch_tasks, batch_tasks
+
+                        if batch_id in batch_tasks:
+                            batch_tasks[batch_id]["cancelled"] = True
+                        _cancel_batch_tasks(batch_id)
+                    except Exception as exc:
+                        logger.warning("批量任务取消联动失败: %s", exc)
+                    await websocket.send_json(
+                        {
+                            "type": "status",
+                            "batch_id": batch_id,
+                            "status": "cancelling",
+                            "message": "取消请求已提交，正在让整队缓缓靠边停车",
+                        }
+                    )
 
             except asyncio.TimeoutError:
                 # 超时，发送心跳检测

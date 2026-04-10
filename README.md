@@ -189,6 +189,29 @@
 - 支持打包为 Windows / Linux / macOS 可执行文件
 - 更适配当前 OpenAI 注册与登录链路
 
+## ChatGPT 注册模式
+
+注册页和计划任务配置里的 `refresh_token_enabled` 用来切换两条收口链路：
+
+- `有 RT`：优先走 `Refresh Token` 方案。注册成功后会继续尝试 `callback -> session 复用 -> OAuth/passwordless 接力`，目标是落库 `access_token + refresh_token + session_token`。
+- `无 RT`：走 `Access Token Only` 兼容方案。注册成功后只要求会话复用拿到 `access_token` / `session_token`，不再把 `refresh_token` 作为成功门槛。
+
+使用建议：
+
+- 需要后续稳定续期、导出完整 OAuth 凭据时，使用 `有 RT`。
+- 只要求当前会话可用、允许后续人工补 OAuth 时，使用 `无 RT`。
+
+两种模式都会把最终模式写入账号 `extra_data`，字段包括 `chatgpt_registration_mode`、`chatgpt_has_refresh_token_solution`、`has_refresh_token` 等，便于后续排查。
+
+## WebSocket 实时日志机制
+
+注册页实时日志使用 `/api/ws/task/{task_uuid}` 和 `/api/ws/batch/{batch_id}` 两条 WebSocket 通道：
+
+- 任务创建后，前端优先建立 WebSocket 监听，不再依赖高频轮询拿日志。
+- 新连接会先收到当前状态，再补发该任务已存在的历史日志；后续日志由后台事件队列实时广播。
+- 单任务和批量任务都支持断线重连，前端按消息内容做去重，避免页面跳转或网络抖动后日志断档。
+- 批量取消会同时标记批次状态和子任务取消请求，自动补货场景也会同步更新监控面板状态。
+
 ## 账号管理页补充说明
 
 当前 `账号管理` 页除了基础账号表，还包含几组已经落地的运维能力：

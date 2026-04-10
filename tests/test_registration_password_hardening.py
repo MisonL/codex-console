@@ -1,8 +1,12 @@
+import base64
+import json
+
 from src.core import register as register_module
 from src.core.anyauto import chatgpt_client as chatgpt_client_module
 from src.core.anyauto import register_flow as register_flow_module
 from src.core.anyauto.chatgpt_client import ChatGPTClient
 from src.core.anyauto.register_flow import AnyAutoRegistrationEngine
+from src.core.anyauto.utils import FlowState
 from src.core.openai.sentinel_browser import BrowserSentinelArtifacts
 from src.core.register import RegistrationEngine
 from src.core.utils import generate_password
@@ -122,6 +126,76 @@ def test_anyauto_should_not_retry_environment_rejection_diagnostic():
     ) is False
 
 
+def test_anyauto_capture_partial_auth_result_preserves_phone_required_context():
+    def _encode_cookie(payload):
+        return (
+            base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8"))
+            .decode("ascii")
+            .rstrip("=")
+        )
+
+    def _make_jwt(payload):
+        header = _encode_cookie({"alg": "none", "typ": "JWT"})
+        body = _encode_cookie(payload)
+        return f"{header}.{body}.sig"
+
+    class _Cookies:
+        def __init__(self, values):
+            self._values = dict(values)
+
+        def get(self, key):
+            return self._values.get(key)
+
+    class _Session:
+        def __init__(self):
+            self.cookies = _Cookies(
+                {
+                    "oai-client-auth-session": _encode_cookie(
+                        {"workspaces": [{"id": "ws-1"}]}
+                    ),
+                }
+            )
+
+    class _ChatGPTClient:
+        def __init__(self):
+            self.session = _Session()
+            self.refresh_token = ""
+
+        def get_next_auth_session_token(self):
+            return "session-1"
+
+        def fetch_chatgpt_session(self):
+            return True, {
+                "accessToken": _make_jwt(
+                    {
+                        "https://api.openai.com/auth": {
+                            "chatgpt_account_id": "acct-1",
+                            "chatgpt_user_id": "user-1",
+                        }
+                    }
+                ),
+                "sessionToken": "session-1",
+                "user": {"id": "user-1"},
+                "account": {"id": "acct-1"},
+                "authProvider": "openai",
+                "expires": "2026-04-09T10:00:00Z",
+            }
+
+    engine = AnyAutoRegistrationEngine.__new__(AnyAutoRegistrationEngine)
+    engine._log = lambda *_args, **_kwargs: None
+
+    partial = AnyAutoRegistrationEngine._capture_partial_auth_result(
+        engine,
+        _ChatGPTClient(),
+    )
+
+    assert partial["session_token"] == "session-1"
+    assert partial["account_id"] == "acct-1"
+    assert partial["workspace_id"] == "ws-1"
+    assert partial["metadata"]["user_id"] == "user-1"
+    assert partial["metadata"]["auth_provider"] == "openai"
+
+
 def test_anyauto_register_user_sends_device_and_sentinel_headers(monkeypatch):
     calls = []
 
@@ -130,7 +204,10 @@ def test_anyauto_register_user_sends_device_and_sentinel_headers(monkeypatch):
             calls.append((url, kwargs))
 
             class Response:
+                url = "https://auth.openai.com/api/accounts/user/register"
                 status_code = 200
+                headers = {}
+                text = "{}"
 
                 @staticmethod
                 def json():
@@ -146,6 +223,7 @@ def test_anyauto_register_user_sends_device_and_sentinel_headers(monkeypatch):
     client.sec_ch_ua = '"Chromium";v="145"'
     client.impersonate = "chrome"
     client.browser_mode = "protocol"
+    client.last_registration_state = FlowState()
     client._log = lambda *_args, **_kwargs: None
     client._browser_pause = lambda *_args, **_kwargs: None
     client._headers = lambda url, **kwargs: {"accept": kwargs["accept"], **(kwargs.get("extra_headers") or {})}
@@ -158,6 +236,7 @@ def test_anyauto_register_user_sends_device_and_sentinel_headers(monkeypatch):
             passkey_capabilities='{"conditionalGet":true}',
         ),
     )
+    monkeypatch.setattr(chatgpt_client_module, "build_sentinel_token", lambda *args, **kwargs: "")
     monkeypatch.setattr(chatgpt_client_module, "generate_datadog_trace", lambda: {"x-trace-id": "trace-1"})
 
     success, message = ChatGPTClient.register_user(client, "tester@example.com", "Aa1!fixedPwd")
@@ -178,6 +257,7 @@ def test_anyauto_register_user_upgrades_generic_400_to_environment_rejection(mon
     class DummySession:
         def post(self, url, **kwargs):
             class Response:
+                url = "https://auth.openai.com/api/accounts/user/register"
                 status_code = 400
                 headers = {"x-request-id": "req-400"}
                 text = '{"error":{"message":"Failed to create account. Please try again.","type":"invalid_request_error","code":null}}'
@@ -202,6 +282,7 @@ def test_anyauto_register_user_upgrades_generic_400_to_environment_rejection(mon
     client.sec_ch_ua = '"Chromium";v="145"'
     client.impersonate = "chrome"
     client.browser_mode = "protocol"
+    client.last_registration_state = FlowState()
     client._log = lambda *_args, **_kwargs: None
     client._browser_pause = lambda *_args, **_kwargs: None
     client._headers = lambda url, **kwargs: {"accept": kwargs["accept"], **(kwargs.get("extra_headers") or {})}
@@ -214,6 +295,7 @@ def test_anyauto_register_user_upgrades_generic_400_to_environment_rejection(mon
             passkey_capabilities='{"conditionalGet":true}',
         ),
     )
+    monkeypatch.setattr(chatgpt_client_module, "build_sentinel_token", lambda *args, **kwargs: "")
     monkeypatch.setattr(chatgpt_client_module, "generate_datadog_trace", lambda: {"x-trace-id": "trace-1"})
 
     success, message = ChatGPTClient.register_user(client, "tester@example.com", "Aa1!fixedPwd")

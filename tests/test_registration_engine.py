@@ -1,16 +1,25 @@
 import base64
 import json
+from contextlib import contextmanager
+from types import SimpleNamespace
 
-from src.config.constants import EmailServiceType, OPENAI_API_ENDPOINTS, OPENAI_PAGE_TYPES
+from src.config.constants import (
+    EmailServiceType,
+    OPENAI_API_ENDPOINTS,
+    OPENAI_PAGE_TYPES,
+)
 from src.core.http_client import OpenAIHTTPClient
 from src.core.openai.oauth import OAuthStart
 from src.core.openai.sentinel_browser import BrowserSentinelArtifacts
-from src.core.register import RegistrationEngine
+import src.core.register as register_module
+from src.core.register import RegistrationEngine, RegistrationResult
 from src.services.base import BaseEmailService
 
 
 class DummyResponse:
-    def __init__(self, status_code=200, payload=None, text="", headers=None, on_return=None):
+    def __init__(
+        self, status_code=200, payload=None, text="", headers=None, on_return=None
+    ):
         self.status_code = status_code
         self._payload = payload
         self.text = text
@@ -42,11 +51,13 @@ class QueueSession:
         return None
 
     def _request(self, method, url, **kwargs):
-        self.calls.append({
-            "method": method,
-            "url": url,
-            "kwargs": kwargs,
-        })
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "kwargs": kwargs,
+            }
+        )
         if not self.steps:
             raise AssertionError(f"unexpected request: {method} {url}")
         expected_method, expected_url, response = self.steps.pop(0)
@@ -71,12 +82,21 @@ class FakeEmailService(BaseEmailService):
             "service_id": "mailbox-1",
         }
 
-    def get_verification_code(self, email, email_id=None, timeout=120, pattern=r"(?<!\d)(\d{6})(?!\d)", otp_sent_at=None):
-        self.otp_requests.append({
-            "email": email,
-            "email_id": email_id,
-            "otp_sent_at": otp_sent_at,
-        })
+    def get_verification_code(
+        self,
+        email,
+        email_id=None,
+        timeout=120,
+        pattern=r"(?<!\d)(\d{6})(?!\d)",
+        otp_sent_at=None,
+    ):
+        self.otp_requests.append(
+            {
+                "email": email,
+                "email_id": email_id,
+                "otp_sent_at": otp_sent_at,
+            }
+        )
         if not self.codes:
             raise AssertionError("no verification code queued")
         return self.codes.pop(0)
@@ -106,11 +126,13 @@ class FakeOAuthManager:
         )
 
     def handle_callback(self, callback_url, expected_state, code_verifier):
-        self.callback_calls.append({
-            "callback_url": callback_url,
-            "expected_state": expected_state,
-            "code_verifier": code_verifier,
-        })
+        self.callback_calls.append(
+            {
+                "callback_url": callback_url,
+                "expected_state": expected_state,
+                "code_verifier": code_verifier,
+            }
+        )
         return {
             "account_id": "acct-1",
             "access_token": "access-1",
@@ -145,9 +167,13 @@ class FakeOpenAIClient:
 
 
 def _workspace_cookie(workspace_id):
-    payload = base64.urlsafe_b64encode(
-        json.dumps({"workspaces": [{"id": workspace_id}]}).encode("utf-8")
-    ).decode("ascii").rstrip("=")
+    payload = (
+        base64.urlsafe_b64encode(
+            json.dumps({"workspaces": [{"id": workspace_id}]}).encode("utf-8")
+        )
+        .decode("ascii")
+        .rstrip("=")
+    )
     return f"{payload}.sig"
 
 
@@ -168,52 +194,90 @@ def _response_with_login_cookies(workspace_id="ws-1", session_token="session-1")
 
 
 def _patch_browser_sentinel(monkeypatch):
-    def fake_browser_sentinel(self, *, flow, page_url, include_session_observer=False, include_passkey_capabilities=False):
+    def fake_browser_sentinel(
+        self,
+        *,
+        flow,
+        page_url,
+        include_session_observer=False,
+        include_passkey_capabilities=False,
+    ):
         return BrowserSentinelArtifacts(
-            token=json.dumps({"id": "browser-did", "flow": flow, "c": f"token-{flow}"}, separators=(",", ":")),
+            token=json.dumps(
+                {"id": "browser-did", "flow": flow, "c": f"token-{flow}"},
+                separators=(",", ":"),
+            ),
             session_observer_token="so-token" if include_session_observer else None,
-            passkey_capabilities='{"conditionalGet":true}' if include_passkey_capabilities else None,
+            passkey_capabilities='{"conditionalGet":true}'
+            if include_passkey_capabilities
+            else None,
         )
 
-    monkeypatch.setattr(RegistrationEngine, "_fetch_browser_sentinel_artifacts", fake_browser_sentinel)
+    monkeypatch.setattr(
+        RegistrationEngine, "_fetch_browser_sentinel_artifacts", fake_browser_sentinel
+    )
 
 
 def test_check_sentinel_sends_non_empty_pow(monkeypatch):
-    session = QueueSession([
-        ("POST", OPENAI_API_ENDPOINTS["sentinel"], DummyResponse(payload={"token": "sentinel-token"})),
-    ])
     client = OpenAIHTTPClient()
-    client._session = session
+    client._session = object()
+
+    calls = []
+
+    def fake_build_sentinel_token(session, did, *, flow, user_agent):
+        calls.append(
+            {
+                "session": session,
+                "did": did,
+                "flow": flow,
+                "user_agent": user_agent,
+            }
+        )
+        return "sentinel-token-v2"
 
     monkeypatch.setattr(
-        "src.core.http_client.build_sentinel_pow_token",
-        lambda user_agent: "gAAAAACpow-token",
+        "src.core.openai.sentinel_token_v2.build_sentinel_token",
+        fake_build_sentinel_token,
     )
 
     token = client.check_sentinel("device-1")
 
-    assert token == "sentinel-token"
-    body = json.loads(session.calls[0]["kwargs"]["data"])
-    assert body["id"] == "device-1"
-    assert body["flow"] == "authorize_continue"
-    assert body["p"] == "gAAAAACpow-token"
+    assert token == "sentinel-token-v2"
+    assert calls == [
+        {
+            "session": client.session,
+            "did": "device-1",
+            "flow": "authorize_continue",
+            "user_agent": client.default_headers["User-Agent"],
+        }
+    ]
 
 
 def test_register_password_sends_device_and_sentinel_headers(monkeypatch):
-    _patch_browser_sentinel(monkeypatch)
-    session = QueueSession([
-        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
-    ])
+    session = QueueSession(
+        [
+            ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
+        ]
+    )
 
     engine = RegistrationEngine.__new__(RegistrationEngine)
     engine.session = session
     engine.email = "tester@example.com"
     engine.password = None
     engine.device_id = "did-123"
+    engine.http_client = type(
+        "HTTPClientStub",
+        (),
+        {"default_headers": {"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US"}},
+    )()
     engine._last_register_password_error = None
     engine._last_register_password_request_id = None
     engine._log = lambda *_args, **_kwargs: None
     monkeypatch.setattr(engine, "_generate_password", lambda length=12: "Aa1!fixedPwd")
+    monkeypatch.setattr(
+        "src.core.openai.sentinel_token_v2.build_sentinel_token",
+        lambda session, did, *, flow, user_agent: "sentinel-token-v2",
+    )
 
     success, password = RegistrationEngine._register_password(
         engine,
@@ -226,61 +290,91 @@ def test_register_password_sends_device_and_sentinel_headers(monkeypatch):
     call = session.calls[0]
     headers = call["kwargs"]["headers"]
     assert headers["oai-device-id"] == "did-123"
-    assert headers["OpenAI-Sentinel-Token"] == (
-        '{"id":"browser-did","flow":"username_password_create","c":"token-username_password_create"}'
-    )
-    assert headers["ext-passkey-client-capabilities"] == '{"conditionalGet":true}'
+    assert headers["OpenAI-Sentinel-Token"] == "sentinel-token-v2"
     body = json.loads(call["kwargs"]["data"])
     assert body == {"password": "Aa1!fixedPwd", "username": "tester@example.com"}
 
 
 def test_run_registers_then_relogs_to_fetch_token(monkeypatch):
     _patch_browser_sentinel(monkeypatch)
-    session_one = QueueSession([
-        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}}),
-        ),
-        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
-        ("GET", OPENAI_API_ENDPOINTS["send_otp"], DummyResponse(payload={})),
-        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
-        ("POST", OPENAI_API_ENDPOINTS["create_account"], DummyResponse(payload={})),
-    ])
-    session_two = QueueSession([
-        ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]}}),
-        ),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["password_verify"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
-        ),
-        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], _response_with_login_cookies()),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["select_workspace"],
-            DummyResponse(payload={"continue_url": "https://auth.example.test/continue"}),
-        ),
-        (
-            "GET",
-            "https://auth.example.test/continue",
-            DummyResponse(
-                status_code=302,
-                headers={"Location": "http://localhost:1455/auth/callback?code=code-2&state=state-2"},
+    session_one = QueueSession(
+        [
+            ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
+            (
+                "POST",
+                OPENAI_API_ENDPOINTS["signup"],
+                DummyResponse(
+                    payload={
+                        "page": {"type": OPENAI_PAGE_TYPES["PASSWORD_REGISTRATION"]}
+                    }
+                ),
             ),
-        ),
-    ])
+            ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(payload={})),
+            ("GET", OPENAI_API_ENDPOINTS["send_otp"], DummyResponse(payload={})),
+            ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
+            ("POST", OPENAI_API_ENDPOINTS["create_account"], DummyResponse(payload={})),
+        ]
+    )
+    session_two = QueueSession(
+        [
+            ("GET", "https://auth.example.test/flow/2", _response_with_did("did-2")),
+            (
+                "POST",
+                OPENAI_API_ENDPOINTS["signup"],
+                DummyResponse(
+                    payload={"page": {"type": OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]}}
+                ),
+            ),
+            (
+                "POST",
+                OPENAI_API_ENDPOINTS["password_verify"],
+                DummyResponse(
+                    payload={
+                        "page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}
+                    }
+                ),
+            ),
+            (
+                "POST",
+                OPENAI_API_ENDPOINTS["validate_otp"],
+                _response_with_login_cookies(),
+            ),
+            (
+                "POST",
+                OPENAI_API_ENDPOINTS["select_workspace"],
+                DummyResponse(
+                    payload={"continue_url": "https://auth.example.test/continue"}
+                ),
+            ),
+            (
+                "GET",
+                "https://auth.example.test/continue",
+                DummyResponse(
+                    status_code=302,
+                    headers={
+                        "Location": "http://localhost:1455/auth/callback?code=code-2&state=state-2"
+                    },
+                ),
+            ),
+        ]
+    )
 
     email_service = FakeEmailService(["123456", "654321"])
     engine = RegistrationEngine(email_service)
     fake_oauth = FakeOAuthManager()
-    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
+    engine.http_client = FakeOpenAIClient(
+        [session_one, session_two], ["sentinel-1", "sentinel-2"]
+    )
+    engine.http_client.default_headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US",
+    }
     engine.oauth_manager = fake_oauth
+    engine.registration_entry_flow = "outlook"
+    monkeypatch.setattr(
+        "src.core.openai.sentinel_token_v2.build_sentinel_token",
+        lambda session, did, *, flow, user_agent: f"sentinel-{flow}",
+    )
 
     result = engine.run()
 
@@ -291,63 +385,169 @@ def test_run_registers_then_relogs_to_fetch_token(monkeypatch):
     assert fake_oauth.start_calls == 2
     assert len(email_service.otp_requests) == 2
     assert all(item["otp_sent_at"] is not None for item in email_service.otp_requests)
-    assert sum(1 for call in session_one.calls if call["url"] == OPENAI_API_ENDPOINTS["send_otp"]) == 1
-    assert sum(1 for call in session_two.calls if call["url"] == OPENAI_API_ENDPOINTS["send_otp"]) == 0
-    assert sum(1 for call in session_one.calls if call["url"] == OPENAI_API_ENDPOINTS["select_workspace"]) == 0
-    assert sum(1 for call in session_two.calls if call["url"] == OPENAI_API_ENDPOINTS["select_workspace"]) == 1
+    assert (
+        sum(
+            1
+            for call in session_one.calls
+            if call["url"] == OPENAI_API_ENDPOINTS["send_otp"]
+        )
+        == 1
+    )
+    assert (
+        sum(
+            1
+            for call in session_two.calls
+            if call["url"] == OPENAI_API_ENDPOINTS["send_otp"]
+        )
+        == 0
+    )
+    assert (
+        sum(
+            1
+            for call in session_one.calls
+            if call["url"] == OPENAI_API_ENDPOINTS["select_workspace"]
+        )
+        == 0
+    )
+    assert (
+        sum(
+            1
+            for call in session_two.calls
+            if call["url"] == OPENAI_API_ENDPOINTS["select_workspace"]
+        )
+        == 1
+    )
     relogin_start_body = json.loads(session_two.calls[1]["kwargs"]["data"])
     assert relogin_start_body["screen_hint"] == "login"
     assert relogin_start_body["username"]["value"] == "tester@example.com"
     password_verify_body = json.loads(session_two.calls[2]["kwargs"]["data"])
     assert password_verify_body == {"password": result.password}
     register_headers = session_one.calls[2]["kwargs"]["headers"]
-    assert register_headers["OpenAI-Sentinel-Token"] == '{"id":"browser-did","flow":"username_password_create","c":"token-username_password_create"}'
-    assert register_headers["ext-passkey-client-capabilities"] == '{"conditionalGet":true}'
+    assert (
+        register_headers["OpenAI-Sentinel-Token"] == "sentinel-username_password_create"
+    )
     create_account_headers = session_one.calls[5]["kwargs"]["headers"]
-    assert create_account_headers["OpenAI-Sentinel-Token"] == '{"id":"browser-did","flow":"oauth_create_account","c":"token-oauth_create_account"}'
-    assert create_account_headers["OpenAI-Sentinel-SO-Token"] == "so-token"
+    assert (
+        create_account_headers["OpenAI-Sentinel-Token"]
+        == "sentinel-oauth_create_account"
+    )
     password_headers = session_two.calls[2]["kwargs"]["headers"]
-    assert password_headers["OpenAI-Sentinel-Token"] == '{"id":"browser-did","flow":"password_verify","c":"token-password_verify"}'
+    assert password_headers["OpenAI-Sentinel-Token"] == "sentinel-password_verify"
     assert result.metadata["token_acquired_via_relogin"] is True
 
 
 def test_existing_account_login_uses_auto_sent_otp_without_manual_send(monkeypatch):
     _patch_browser_sentinel(monkeypatch)
-    session = QueueSession([
-        ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["signup"],
-            DummyResponse(payload={"page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}}),
-        ),
-        ("POST", OPENAI_API_ENDPOINTS["validate_otp"], _response_with_login_cookies("ws-existing", "session-existing")),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["select_workspace"],
-            DummyResponse(payload={"continue_url": "https://auth.example.test/continue-existing"}),
-        ),
-        (
-            "GET",
-            "https://auth.example.test/continue-existing",
-            DummyResponse(
-                status_code=302,
-                headers={"Location": "http://localhost:1455/auth/callback?code=code-1&state=state-1"},
+    session = QueueSession(
+        [
+            ("GET", "https://auth.example.test/flow/1", _response_with_did("did-1")),
+            (
+                "POST",
+                OPENAI_API_ENDPOINTS["signup"],
+                DummyResponse(
+                    payload={
+                        "page": {"type": OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]}
+                    }
+                ),
             ),
-        ),
-    ])
+            (
+                "POST",
+                OPENAI_API_ENDPOINTS["validate_otp"],
+                _response_with_login_cookies("ws-existing", "session-existing"),
+            ),
+            (
+                "POST",
+                OPENAI_API_ENDPOINTS["select_workspace"],
+                DummyResponse(
+                    payload={
+                        "continue_url": "https://auth.example.test/continue-existing"
+                    }
+                ),
+            ),
+            (
+                "GET",
+                "https://auth.example.test/continue-existing",
+                DummyResponse(
+                    status_code=302,
+                    headers={
+                        "Location": "http://localhost:1455/auth/callback?code=code-1&state=state-1"
+                    },
+                ),
+            ),
+        ]
+    )
 
     email_service = FakeEmailService(["246810"])
     engine = RegistrationEngine(email_service)
     fake_oauth = FakeOAuthManager()
     engine.http_client = FakeOpenAIClient([session], ["sentinel-1"])
+    engine.http_client.default_headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US",
+    }
     engine.oauth_manager = fake_oauth
+    engine.registration_entry_flow = "outlook"
+    monkeypatch.setattr(
+        "src.core.openai.sentinel_token_v2.build_sentinel_token",
+        lambda session, did, *, flow, user_agent: f"sentinel-{flow}",
+    )
 
     result = engine.run()
 
     assert result.success is True
     assert result.source == "login"
     assert fake_oauth.start_calls == 1
-    assert sum(1 for call in session.calls if call["url"] == OPENAI_API_ENDPOINTS["send_otp"]) == 0
+    assert (
+        sum(
+            1
+            for call in session.calls
+            if call["url"] == OPENAI_API_ENDPOINTS["send_otp"]
+        )
+        == 0
+    )
     assert len(email_service.otp_requests) == 1
     assert email_service.otp_requests[0]["otp_sent_at"] is not None
     assert result.metadata["token_acquired_via_relogin"] is False
+
+
+def test_save_to_database_backfills_partial_auth_fields_before_insert(monkeypatch):
+    captured = {}
+
+    @contextmanager
+    def fake_get_db():
+        yield object()
+
+    def fake_create_account(_db, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id=101)
+
+    engine = RegistrationEngine.__new__(RegistrationEngine)
+    engine.email_service = SimpleNamespace(
+        service_type=SimpleNamespace(value=EmailServiceType.TEMPMAIL.value)
+    )
+    engine.email_info = {"service_id": "mailbox-1"}
+    engine.proxy_url = "http://user:pass@proxy.local:8080"
+    engine._dump_session_cookies = (
+        lambda: "oai-client-auth-session=session-cookie; __Secure-next-auth.session-token=session-1"
+    )
+    engine._extract_account_id_from_access_token = lambda _token: "acct-1"
+    engine._get_workspace_id = lambda: "ws-1"
+    engine._log = lambda *_args, **_kwargs: None
+
+    monkeypatch.setattr(register_module, "get_settings", lambda: SimpleNamespace(openai_client_id="app-test"))
+    monkeypatch.setattr(register_module, "get_db", fake_get_db)
+    monkeypatch.setattr(register_module.crud, "create_account", fake_create_account)
+
+    result = RegistrationResult(
+        success=True,
+        email="tester@example.com",
+        password="Aa1!fixedPwd",
+        access_token="access-1",
+        metadata={"phone_verification_required": True},
+    )
+
+    assert RegistrationEngine.save_to_database(engine, result) is True
+    assert captured["session_token"] == "session-1"
+    assert captured["account_id"] == "acct-1"
+    assert captured["workspace_id"] == "ws-1"
+    assert captured["cookies"].endswith("session-1")

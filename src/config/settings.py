@@ -10,6 +10,8 @@ from pydantic import BaseModel, field_validator
 from pydantic.types import SecretStr
 from dataclasses import dataclass
 
+from ..core.proxy_utils import build_proxy_url_from_components
+
 
 class SettingCategory(str, Enum):
     """设置分类"""
@@ -868,18 +870,14 @@ class Settings(BaseModel):
         if not self.proxy_enabled:
             return None
 
-        if self.proxy_type == "http":
-            scheme = "http"
-        elif self.proxy_type == "socks5":
-            scheme = "socks5"
-        else:
-            return None
-
-        auth = ""
-        if self.proxy_username and self.proxy_password:
-            auth = f"{self.proxy_username}:{self.proxy_password.get_secret_value()}@"
-
-        return f"{scheme}://{auth}{self.proxy_host}:{self.proxy_port}"
+        password = self.proxy_password.get_secret_value() if self.proxy_password else None
+        return build_proxy_url_from_components(
+            self.proxy_type,
+            self.proxy_host,
+            self.proxy_port,
+            self.proxy_username,
+            password,
+        )
 
     # 注册配置
     registration_max_retries: int = 3

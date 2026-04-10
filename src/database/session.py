@@ -2,17 +2,19 @@
 数据库会话管理
 """
 
-from contextlib import contextmanager
-from typing import Generator
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.exc import SQLAlchemyError
-import os
+import asyncio
 import logging
+import os
+from contextlib import contextmanager
+from typing import Any, Callable, Generator, TypeVar
+
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.orm import sessionmaker, Session
 
 from .models import Base
 
 logger = logging.getLogger(__name__)
+_DBResult = TypeVar("_DBResult")
 
 
 def _build_sqlalchemy_url(database_url: str) -> str:
@@ -45,11 +47,51 @@ class DatabaseSessionManager:
         self.database_url = _build_sqlalchemy_url(database_url)
         self.engine = create_engine(
             self.database_url,
-            connect_args={"check_same_thread": False} if self.database_url.startswith("sqlite") else {},
-            echo=False,  # 设置为 True 可以查看所有 SQL 语句
-            pool_pre_ping=True  # 连接池预检查
+            **self._build_engine_kwargs(),
         )
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self._configure_engine()
+        self.SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+            bind=self.engine,
+        )
+
+    def _build_engine_kwargs(self) -> dict:
+        kwargs = {
+            "echo": False,
+            "pool_pre_ping": True,
+        }
+        if self.database_url.startswith("sqlite"):
+            kwargs["connect_args"] = {
+                "check_same_thread": False,
+                "timeout": 30,
+            }
+            return kwargs
+
+        cpu_count = max(2, os.cpu_count() or 4)
+        kwargs.update(
+            {
+                "pool_size": min(20, cpu_count * 2),
+                "max_overflow": min(20, cpu_count * 2),
+                "pool_recycle": 1800,
+            }
+        )
+        return kwargs
+
+    def _configure_engine(self) -> None:
+        if not self.database_url.startswith("sqlite"):
+            return
+
+        @event.listens_for(self.engine, "connect")
+        def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.close()
 
     def get_db(self) -> Generator[Session, None, None]:
         """
@@ -361,3 +403,25 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def _run_db_call_sync(
+    operation: Callable[..., _DBResult],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> _DBResult:
+    manager = get_session_manager()
+    db = manager.SessionLocal()
+    try:
+        return operation(db, *args, **kwargs)
+    finally:
+        db.close()
+
+
+async def run_db_call(
+    operation: Callable[..., _DBResult],
+    *args: Any,
+    **kwargs: Any,
+) -> _DBResult:
+    """在线程中执行数据库操作，避免在事件循环中直接跑同步 ORM。"""
+    return await asyncio.to_thread(_run_db_call_sync, operation, args, kwargs)

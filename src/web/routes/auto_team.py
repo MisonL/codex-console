@@ -3040,7 +3040,7 @@ def get_team_account_members(account_id: int, proxy: Optional[str] = None):
 
 
 @router.post("/team-accounts/{account_id}/members/invite")
-async def invite_team_member(account_id: int, request: TeamMemberInviteRequest):
+def invite_team_member(account_id: int, request: TeamMemberInviteRequest):
     """
     在 Team 管理弹窗中新增成员邀请。
     """
@@ -3109,7 +3109,7 @@ async def invite_team_member(account_id: int, request: TeamMemberInviteRequest):
 
 
 @router.post("/team-accounts/{account_id}/members/revoke")
-async def revoke_team_member_invite(account_id: int, request: TeamMemberRevokeRequest):
+def revoke_team_member_invite(account_id: int, request: TeamMemberRevokeRequest):
     """
     撤回 Team 邀请（待加入成员）。
     """
@@ -3155,7 +3155,7 @@ async def revoke_team_member_invite(account_id: int, request: TeamMemberRevokeRe
 
 
 @router.post("/team-accounts/{account_id}/members/remove")
-async def remove_team_member(account_id: int, request: TeamMemberRemoveRequest):
+def remove_team_member(account_id: int, request: TeamMemberRemoveRequest):
     """
     移除 Team 已加入成员。
     """
@@ -3200,7 +3200,7 @@ async def remove_team_member(account_id: int, request: TeamMemberRemoveRequest):
 
 
 @router.post("/preview")
-async def preview_auto_team(request: AutoTeamPreviewRequest):
+def preview_auto_team(request: AutoTeamPreviewRequest):
     """预检输入与可用邀请账号。"""
     target_email = str(request.target_email or "").strip()
 

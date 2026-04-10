@@ -11,9 +11,33 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.types import TypeDecorator
 
 from ..config.constants import AccountLabel, PoolState, RoleTag
+from ..core.proxy_utils import build_proxy_url_from_components, split_proxy_components
 from ..core.timezone_utils import utcnow_naive
 
 Base = declarative_base()
+
+
+def _safe_isoformat(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    iso_fn = getattr(value, "isoformat", None)
+    if callable(iso_fn):
+        try:
+            return str(iso_fn())
+        except Exception:
+            pass
+    text = str(value).strip()
+    return text or None
+
+
+def _safe_positive_int(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
 
 
 class JSONEncodedDict(TypeDecorator):
@@ -410,38 +434,50 @@ class Proxy(Base):
 
     def to_dict(self, include_password: bool = False) -> Dict[str, Any]:
         """转换为字典"""
+        try:
+            normalized = split_proxy_components(
+                self.type,
+                self.host,
+                self.port,
+                self.username,
+                self.password,
+            )
+        except Exception:
+            normalized = {
+                "type": str(self.type or "http").strip() or "http",
+                "host": str(self.host or "").strip(),
+                "port": _safe_positive_int(self.port),
+                "username": str(self.username or "").strip() or None,
+                "password": str(self.password or "").strip() or None,
+            }
         result = {
             'id': self.id,
             'name': self.name,
-            'type': self.type,
-            'host': self.host,
-            'port': self.port,
-            'username': self.username,
+            'type': normalized.get('type') or "http",
+            'host': normalized.get('host') or "",
+            'port': normalized.get('port'),
+            'username': normalized.get('username'),
             'enabled': self.enabled,
             'is_default': self.is_default or False,
             'priority': self.priority,
-            'last_used': self.last_used.isoformat() if self.last_used else None,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'last_used': _safe_isoformat(self.last_used),
+            'created_at': _safe_isoformat(self.created_at),
+            'updated_at': _safe_isoformat(self.updated_at),
         }
         if include_password:
-            result['password'] = self.password
+            result['password'] = normalized.get('password')
         else:
-            result['has_password'] = bool(self.password)
+            result['has_password'] = bool(normalized.get('password'))
         return result
 
     @property
     def proxy_url(self) -> str:
         """获取完整的代理 URL"""
-        if self.type == "http":
-            scheme = "http"
-        elif self.type == "socks5":
-            scheme = "socks5"
-        else:
-            scheme = self.type
-
-        auth = ""
-        if self.username and self.password:
-            auth = f"{self.username}:{self.password}@"
-
-        return f"{scheme}://{auth}{self.host}:{self.port}"
+        proxy_url = build_proxy_url_from_components(
+            self.type,
+            self.host,
+            self.port,
+            self.username,
+            self.password,
+        )
+        return proxy_url or ""

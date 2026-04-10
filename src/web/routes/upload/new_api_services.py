@@ -72,7 +72,7 @@ def _to_response(service) -> NewApiServiceResponse:
 
 
 @router.get("", response_model=List[NewApiServiceResponse])
-async def list_new_api_services(enabled: Optional[bool] = None):
+def list_new_api_services(enabled: Optional[bool] = None):
     """获取 new-api 服务列表。"""
     with get_db() as db:
         services = crud.get_new_api_services(db, enabled=enabled)
@@ -80,7 +80,7 @@ async def list_new_api_services(enabled: Optional[bool] = None):
 
 
 @router.post("", response_model=NewApiServiceResponse)
-async def create_new_api_service(request: NewApiServiceCreate):
+def create_new_api_service(request: NewApiServiceCreate):
     """新增 new-api 服务。"""
     with get_db() as db:
         service = crud.create_new_api_service(
@@ -96,7 +96,7 @@ async def create_new_api_service(request: NewApiServiceCreate):
 
 
 @router.get("/{service_id}", response_model=NewApiServiceResponse)
-async def get_new_api_service(service_id: int):
+def get_new_api_service(service_id: int):
     """获取单个 new-api 服务详情。"""
     with get_db() as db:
         service = crud.get_new_api_service_by_id(db, service_id)
@@ -106,7 +106,7 @@ async def get_new_api_service(service_id: int):
 
 
 @router.get("/{service_id}/full")
-async def get_new_api_service_full(service_id: int):
+def get_new_api_service_full(service_id: int):
     """获取 new-api 服务完整配置。"""
     with get_db() as db:
         service = crud.get_new_api_service_by_id(db, service_id)
@@ -124,7 +124,7 @@ async def get_new_api_service_full(service_id: int):
 
 
 @router.patch("/{service_id}", response_model=NewApiServiceResponse)
-async def update_new_api_service(service_id: int, request: NewApiServiceUpdate):
+def update_new_api_service(service_id: int, request: NewApiServiceUpdate):
     """更新 new-api 服务配置。"""
     with get_db() as db:
         service = crud.get_new_api_service_by_id(db, service_id)
@@ -150,7 +150,7 @@ async def update_new_api_service(service_id: int, request: NewApiServiceUpdate):
 
 
 @router.delete("/{service_id}")
-async def delete_new_api_service(service_id: int):
+def delete_new_api_service(service_id: int):
     """删除 new-api 服务。"""
     with get_db() as db:
         service = crud.get_new_api_service_by_id(db, service_id)
@@ -161,7 +161,7 @@ async def delete_new_api_service(service_id: int):
 
 
 @router.post("/{service_id}/test")
-async def test_new_api_service(service_id: int):
+def test_new_api_service(service_id: int):
     """测试 new-api 服务连接。"""
     with get_db() as db:
         service = crud.get_new_api_service_by_id(db, service_id)
@@ -172,7 +172,7 @@ async def test_new_api_service(service_id: int):
 
 
 @router.post("/test-connection")
-async def test_new_api_connection_direct(request: NewApiTestRequest):
+def test_new_api_connection_direct(request: NewApiTestRequest):
     """直接测试 new-api 连接。"""
     if not request.api_url or not request.username or not request.password:
         raise HTTPException(status_code=400, detail="api_url、username 和 password 不能为空")
@@ -181,7 +181,7 @@ async def test_new_api_connection_direct(request: NewApiTestRequest):
 
 
 @router.post("/upload")
-async def upload_accounts_to_new_api(request: NewApiUploadRequest):
+def upload_accounts_to_new_api(request: NewApiUploadRequest):
     """批量上传账号到 new-api 平台。"""
     if not request.account_ids:
         raise HTTPException(status_code=400, detail="账号 ID 列表不能为空")

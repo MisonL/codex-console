@@ -15,6 +15,7 @@ from curl_cffi.requests import Session, Response
 from ..config.constants import ERROR_MESSAGES
 from ..config.settings import get_settings
 from .openai.sentinel import SentinelPOWError, build_sentinel_pow_token
+from .proxy_utils import build_requests_proxy_map, normalize_proxy_url
 
 
 logger = logging.getLogger(__name__)
@@ -56,19 +57,14 @@ class HTTPClient:
             config: 请求配置
             session: 可重用的会话对象
         """
-        self.proxy_url = proxy_url
+        self.proxy_url = normalize_proxy_url(proxy_url)
         self.config = config or RequestConfig()
         self._session = session
 
     @property
     def proxies(self) -> Optional[Dict[str, str]]:
         """获取代理配置"""
-        if not self.proxy_url:
-            return None
-        return {
-            "http": self.proxy_url,
-            "https": self.proxy_url,
-        }
+        return build_requests_proxy_map(self.proxy_url)
 
     @property
     def session(self) -> Session:

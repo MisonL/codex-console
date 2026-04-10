@@ -261,10 +261,14 @@ class CloudMailService(BaseEmailService):
             完整的邮箱地址
         """
         if not prefix:
-            # 生成随机前缀：首字母 + 9位随机字符（共10位）
-            first = random.choice(string.ascii_lowercase)
-            rest = "".join(random.choices(string.ascii_lowercase + string.digits, k=9))
-            prefix = f"{first}{rest}"
+            try:
+                from ..core.anyauto.utils import generate_pinyin_prefix
+                prefix = generate_pinyin_prefix()
+            except ImportError:
+                # 备选方案：生成随机前缀
+                first = random.choice(string.ascii_lowercase)
+                rest = "".join(random.choices(string.ascii_lowercase + string.digits, k=9))
+                prefix = f"{first}{rest}"
 
         # 如果没有指定域名，从配置中获取
         if not domain:

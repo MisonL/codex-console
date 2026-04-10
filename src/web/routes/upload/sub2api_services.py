@@ -74,7 +74,7 @@ def _to_response(svc) -> Sub2ApiServiceResponse:
 # ============== API Endpoints ==============
 
 @router.get("", response_model=List[Sub2ApiServiceResponse])
-async def list_sub2api_services(enabled: Optional[bool] = None):
+def list_sub2api_services(enabled: Optional[bool] = None):
     """获取 Sub2API 服务列表"""
     with get_db() as db:
         services = crud.get_sub2api_services(db, enabled=enabled)
@@ -82,7 +82,7 @@ async def list_sub2api_services(enabled: Optional[bool] = None):
 
 
 @router.post("", response_model=Sub2ApiServiceResponse)
-async def create_sub2api_service(request: Sub2ApiServiceCreate):
+def create_sub2api_service(request: Sub2ApiServiceCreate):
     """新增 Sub2API 服务"""
     with get_db() as db:
         svc = crud.create_sub2api_service(
@@ -98,7 +98,7 @@ async def create_sub2api_service(request: Sub2ApiServiceCreate):
 
 
 @router.get("/{service_id}", response_model=Sub2ApiServiceResponse)
-async def get_sub2api_service(service_id: int):
+def get_sub2api_service(service_id: int):
     """获取单个 Sub2API 服务详情"""
     with get_db() as db:
         svc = crud.get_sub2api_service_by_id(db, service_id)
@@ -108,7 +108,7 @@ async def get_sub2api_service(service_id: int):
 
 
 @router.get("/{service_id}/full")
-async def get_sub2api_service_full(service_id: int):
+def get_sub2api_service_full(service_id: int):
     """获取 Sub2API 服务完整配置（含 API Key）"""
     with get_db() as db:
         svc = crud.get_sub2api_service_by_id(db, service_id)
@@ -126,7 +126,7 @@ async def get_sub2api_service_full(service_id: int):
 
 
 @router.patch("/{service_id}", response_model=Sub2ApiServiceResponse)
-async def update_sub2api_service(service_id: int, request: Sub2ApiServiceUpdate):
+def update_sub2api_service(service_id: int, request: Sub2ApiServiceUpdate):
     """更新 Sub2API 服务配置"""
     with get_db() as db:
         svc = crud.get_sub2api_service_by_id(db, service_id)
@@ -153,7 +153,7 @@ async def update_sub2api_service(service_id: int, request: Sub2ApiServiceUpdate)
 
 
 @router.delete("/{service_id}")
-async def delete_sub2api_service(service_id: int):
+def delete_sub2api_service(service_id: int):
     """删除 Sub2API 服务"""
     with get_db() as db:
         svc = crud.get_sub2api_service_by_id(db, service_id)
@@ -164,7 +164,7 @@ async def delete_sub2api_service(service_id: int):
 
 
 @router.post("/{service_id}/test")
-async def test_sub2api_service(service_id: int):
+def test_sub2api_service(service_id: int):
     """测试 Sub2API 服务连接"""
     with get_db() as db:
         svc = crud.get_sub2api_service_by_id(db, service_id)
@@ -175,7 +175,7 @@ async def test_sub2api_service(service_id: int):
 
 
 @router.post("/test-connection")
-async def test_sub2api_connection_direct(request: Sub2ApiTestRequest):
+def test_sub2api_connection_direct(request: Sub2ApiTestRequest):
     """直接测试 Sub2API 连接（用于添加前验证）"""
     if not request.api_url or not request.api_key:
         raise HTTPException(status_code=400, detail="api_url 和 api_key 不能为空")
@@ -184,7 +184,7 @@ async def test_sub2api_connection_direct(request: Sub2ApiTestRequest):
 
 
 @router.post("/upload")
-async def upload_accounts_to_sub2api(request: Sub2ApiUploadRequest):
+def upload_accounts_to_sub2api(request: Sub2ApiUploadRequest):
     """批量上传账号到 Sub2API 平台"""
     if not request.account_ids:
         raise HTTPException(status_code=400, detail="账号 ID 列表不能为空")

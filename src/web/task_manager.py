@@ -5,18 +5,31 @@
 
 import asyncio
 import logging
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, List, Callable, Any, Set, Tuple
 from collections import defaultdict
-from datetime import datetime
 
 from ..core.timezone_utils import utcnow_naive
 
 logger = logging.getLogger(__name__)
 
-# 全局线程池（支持最多 50 个并发注册任务）
-_executor = ThreadPoolExecutor(max_workers=50, thread_name_prefix="reg_worker")
+def _default_executor_workers() -> int:
+    configured = os.environ.get("APP_TASK_EXECUTOR_MAX_WORKERS")
+    if configured:
+        try:
+            return max(4, min(64, int(configured)))
+        except ValueError:
+            logger.warning("APP_TASK_EXECUTOR_MAX_WORKERS 无效，回退到自动配置: %s", configured)
+    cpu_count = max(2, os.cpu_count() or 4)
+    return min(32, max(8, cpu_count * 4))
+
+
+_executor = ThreadPoolExecutor(
+    max_workers=_default_executor_workers(),
+    thread_name_prefix="reg_worker",
+)
 
 # 全局元锁：保护所有 defaultdict 的首次 key 创建（避免多线程竞态）
 _meta_lock = threading.Lock()
@@ -34,14 +47,17 @@ _ws_sent_index: Dict[str, Dict] = defaultdict(dict)
 
 # 任务状态
 _task_status: Dict[str, dict] = {}
+_task_status_lock = threading.Lock()
 
 # 任务取消标志
 _task_cancelled: Dict[str, bool] = {}
+_task_cancelled_lock = threading.Lock()
 
 # 批量任务状态 (batch_id -> dict)
 _batch_status: Dict[str, dict] = {}
 _batch_logs: Dict[str, List[str]] = defaultdict(list)
 _batch_locks: Dict[str, threading.Lock] = {}
+_batch_status_lock = threading.Lock()
 
 # 统一任务中心（跨模块任务状态）
 _DOMAIN_DEFAULT_QUOTAS: Dict[str, int] = {
@@ -81,67 +97,125 @@ class TaskManager:
     def __init__(self):
         self.executor = _executor
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._event_queue: Optional[asyncio.Queue] = None
+        self._event_worker: Optional[asyncio.Task] = None
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         """设置事件循环（在 FastAPI 启动时调用）"""
         self._loop = loop
+        if self._event_worker and not self._event_worker.done():
+            return
+        self._event_queue = asyncio.Queue()
+        self._event_worker = loop.create_task(self._event_worker_loop())
 
     def get_loop(self) -> Optional[asyncio.AbstractEventLoop]:
         """获取事件循环"""
         return self._loop
 
+    async def shutdown(self) -> None:
+        """关闭内部异步分发协程。"""
+        worker = self._event_worker
+        self._event_worker = None
+        self._event_queue = None
+        if not worker:
+            return
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
     def is_cancelled(self, task_uuid: str) -> bool:
         """检查任务是否已取消"""
-        return _task_cancelled.get(task_uuid, False)
+        with _task_cancelled_lock:
+            return _task_cancelled.get(task_uuid, False)
 
     def cancel_task(self, task_uuid: str):
         """取消任务"""
-        _task_cancelled[task_uuid] = True
+        with _task_cancelled_lock:
+            _task_cancelled[task_uuid] = True
         logger.info(f"任务 {task_uuid} 已标记为取消")
 
     def add_log(self, task_uuid: str, log_message: str):
         """添加日志并推送到 WebSocket（线程安全）"""
-        # 先广播到 WebSocket，确保实时推送
-        # 然后再添加到队列，这样 get_unsent_logs 不会获取到这条日志
-        if self._loop and self._loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._broadcast_log(task_uuid, log_message),
-                    self._loop
-                )
-            except Exception as e:
-                logger.warning(f"推送日志到 WebSocket 失败: {e}")
-
-        # 广播后再添加到队列
         with _get_log_lock(task_uuid):
             _log_queues[task_uuid].append(log_message)
+        self._enqueue_event(
+            {
+                "kind": "task_log",
+                "task_uuid": task_uuid,
+                "message": log_message,
+            }
+        )
+
+    def _enqueue_event(self, event: Dict[str, Any]) -> None:
+        queue = self._event_queue
+        loop = self._loop
+        if queue is None or loop is None or not loop.is_running():
+            return
+
+        def _put_nowait() -> None:
+            active_queue = self._event_queue
+            if active_queue is None:
+                return
+            active_queue.put_nowait(event)
+
+        loop.call_soon_threadsafe(_put_nowait)
+
+    async def _event_worker_loop(self) -> None:
+        while True:
+            try:
+                if self._event_queue is None:
+                    await asyncio.sleep(0.1)
+                    continue
+                event = await self._event_queue.get()
+            except asyncio.CancelledError:
+                raise
+
+            try:
+                kind = event.get("kind")
+                if kind == "task_log":
+                    await self._broadcast_log(event["task_uuid"], event["message"])
+                elif kind == "task_status":
+                    await self._broadcast_status(event["task_uuid"], event["status"], **event["extra"])
+                elif kind == "batch_log":
+                    await self._broadcast_batch_log(event["batch_id"], event["message"])
+                elif kind == "batch_status":
+                    await self._broadcast_batch_status(event["batch_id"])
+            except Exception as exc:
+                logger.warning("任务事件分发失败: %s", exc)
+            finally:
+                if self._event_queue is not None:
+                    self._event_queue.task_done()
 
     async def _broadcast_log(self, task_uuid: str, log_message: str):
         """广播日志到所有 WebSocket 连接"""
         with _ws_lock:
             connections = _ws_connections.get(task_uuid, []).copy()
-            # 注意：不在这里更新 sent_index，因为日志已经通过 add_log 添加到队列
-            # sent_index 应该只在 get_unsent_logs 或发送历史日志时更新
-            # 这样可以避免竞态条件
 
         for ws in connections:
             try:
-                await ws.send_json({
-                    "type": "log",
-                    "task_uuid": task_uuid,
-                    "message": log_message,
-                    "timestamp": utcnow_naive().isoformat()
-                })
-                # 发送成功后更新 sent_index
+                await ws.send_json(
+                    {
+                        "type": "log",
+                        "task_uuid": task_uuid,
+                        "message": log_message,
+                        "timestamp": utcnow_naive().isoformat(),
+                    }
+                )
                 with _ws_lock:
                     ws_id = id(ws)
                     if task_uuid in _ws_sent_index and ws_id in _ws_sent_index[task_uuid]:
                         _ws_sent_index[task_uuid][ws_id] += 1
-            except Exception as e:
-                logger.warning(f"WebSocket 发送失败: {e}")
+            except Exception as exc:
+                logger.warning("WebSocket 日志发送失败: %s", exc)
 
     async def broadcast_status(self, task_uuid: str, status: str, **kwargs):
         """广播任务状态更新"""
+        await self._broadcast_status(task_uuid, status, **kwargs)
+
+    async def _broadcast_status(self, task_uuid: str, status: str, **kwargs):
+        """广播任务状态更新。"""
         with _ws_lock:
             connections = _ws_connections.get(task_uuid, []).copy()
 
@@ -150,14 +224,14 @@ class TaskManager:
             "task_uuid": task_uuid,
             "status": status,
             "timestamp": utcnow_naive().isoformat(),
-            **kwargs
+            **kwargs,
         }
 
         for ws in connections:
             try:
                 await ws.send_json(message)
-            except Exception as e:
-                logger.warning(f"WebSocket 发送状态失败: {e}")
+            except Exception as exc:
+                logger.warning("WebSocket 状态发送失败: %s", exc)
 
     def register_websocket(self, task_uuid: str, websocket):
         """注册 WebSocket 连接"""
@@ -167,9 +241,8 @@ class TaskManager:
             # 避免重复注册同一个连接
             if websocket not in _ws_connections[task_uuid]:
                 _ws_connections[task_uuid].append(websocket)
-                # 记录已发送的日志数量，用于发送历史日志时避免重复
-                with _get_log_lock(task_uuid):
-                    _ws_sent_index[task_uuid][id(websocket)] = len(_log_queues.get(task_uuid, []))
+                # 新连接默认补发当前全部历史日志，前端负责按消息去重。
+                _ws_sent_index[task_uuid][id(websocket)] = 0
                 logger.info(f"WebSocket 连接已注册，日志小喇叭准备开播: {task_uuid}")
             else:
                 logger.warning(f"WebSocket 连接已存在，跳过重复注册: {task_uuid}")
@@ -207,64 +280,62 @@ class TaskManager:
 
     def update_status(self, task_uuid: str, status: str, **kwargs):
         """更新任务状态"""
-        if task_uuid not in _task_status:
-            _task_status[task_uuid] = {}
+        with _task_status_lock:
+            if task_uuid not in _task_status:
+                _task_status[task_uuid] = {}
 
-        _task_status[task_uuid]["status"] = status
-        _task_status[task_uuid].update(kwargs)
+            _task_status[task_uuid]["status"] = status
+            _task_status[task_uuid].update(kwargs)
 
-        # 与批量任务保持一致：状态变更后主动广播，避免前端只停留在初始 pending。
-        if self._loop and self._loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self.broadcast_status(task_uuid, status, **kwargs),
-                    self._loop,
-                )
-            except Exception as e:
-                logger.warning(f"广播任务状态失败: {e}")
+        self._enqueue_event(
+            {
+                "kind": "task_status",
+                "task_uuid": task_uuid,
+                "status": status,
+                "extra": dict(kwargs),
+            }
+        )
 
     def get_status(self, task_uuid: str) -> Optional[dict]:
         """获取任务状态"""
-        return _task_status.get(task_uuid)
+        with _task_status_lock:
+            status = _task_status.get(task_uuid)
+            return dict(status) if status else None
 
     def cleanup_task(self, task_uuid: str):
         """清理任务数据"""
-        # 保留日志队列一段时间，以便后续查询
-        # 只清理取消标志
-        if task_uuid in _task_cancelled:
-            del _task_cancelled[task_uuid]
+        with _task_cancelled_lock:
+            if task_uuid in _task_cancelled:
+                del _task_cancelled[task_uuid]
 
     # ============== 批量任务管理 ==============
 
     def init_batch(self, batch_id: str, total: int):
         """初始化批量任务"""
-        _batch_status[batch_id] = {
-            "status": "running",
-            "total": total,
-            "completed": 0,
-            "success": 0,
-            "failed": 0,
-            "skipped": 0,
-            "current_index": 0,
-            "finished": False
-        }
+        with _batch_status_lock:
+            _batch_status[batch_id] = {
+                "status": "running",
+                "total": total,
+                "completed": 0,
+                "success": 0,
+                "failed": 0,
+                "skipped": 0,
+                "current_index": 0,
+                "finished": False,
+            }
         logger.info(f"批量任务 {batch_id} 已初始化，总数: {total}")
 
     def add_batch_log(self, batch_id: str, log_message: str):
         """添加批量任务日志并推送"""
-        # 先广播到 WebSocket，确保实时推送
-        if self._loop and self._loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._broadcast_batch_log(batch_id, log_message),
-                    self._loop
-                )
-            except Exception as e:
-                logger.warning(f"推送批量日志到 WebSocket 失败: {e}")
-
-        # 广播后再添加到队列
         with _get_batch_lock(batch_id):
             _batch_logs[batch_id].append(log_message)
+        self._enqueue_event(
+            {
+                "kind": "batch_log",
+                "batch_id": batch_id,
+                "message": log_message,
+            }
+        )
 
     async def _broadcast_batch_log(self, batch_id: str, log_message: str):
         """广播批量任务日志"""
@@ -275,59 +346,62 @@ class TaskManager:
 
         for ws in connections:
             try:
-                await ws.send_json({
-                    "type": "log",
-                    "batch_id": batch_id,
-                    "message": log_message,
-                    "timestamp": utcnow_naive().isoformat()
-                })
-                # 发送成功后更新 sent_index
+                await ws.send_json(
+                    {
+                        "type": "log",
+                        "batch_id": batch_id,
+                        "message": log_message,
+                        "timestamp": utcnow_naive().isoformat(),
+                    }
+                )
                 with _ws_lock:
                     ws_id = id(ws)
                     if key in _ws_sent_index and ws_id in _ws_sent_index[key]:
                         _ws_sent_index[key][ws_id] += 1
-            except Exception as e:
-                logger.warning(f"WebSocket 发送批量日志失败: {e}")
+            except Exception as exc:
+                logger.warning("WebSocket 批量日志发送失败: %s", exc)
 
     def update_batch_status(self, batch_id: str, **kwargs):
         """更新批量任务状态"""
-        if batch_id not in _batch_status:
-            logger.warning(f"批量任务 {batch_id} 不存在")
-            return
+        with _batch_status_lock:
+            if batch_id not in _batch_status:
+                logger.warning(f"批量任务 {batch_id} 不存在")
+                return
+            _batch_status[batch_id].update(kwargs)
 
-        _batch_status[batch_id].update(kwargs)
-
-        # 异步广播状态更新
-        if self._loop and self._loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._broadcast_batch_status(batch_id),
-                    self._loop
-                )
-            except Exception as e:
-                logger.warning(f"广播批量状态失败: {e}")
+        self._enqueue_event(
+            {
+                "kind": "batch_status",
+                "batch_id": batch_id,
+            }
+        )
 
     async def _broadcast_batch_status(self, batch_id: str):
         """广播批量任务状态"""
         with _ws_lock:
             connections = _ws_connections.get(f"batch_{batch_id}", []).copy()
 
-        status = _batch_status.get(batch_id, {})
+        with _batch_status_lock:
+            status = dict(_batch_status.get(batch_id, {}))
 
         for ws in connections:
             try:
-                await ws.send_json({
-                    "type": "status",
-                    "batch_id": batch_id,
-                    "timestamp": utcnow_naive().isoformat(),
-                    **status
-                })
-            except Exception as e:
-                logger.warning(f"WebSocket 发送批量状态失败: {e}")
+                await ws.send_json(
+                    {
+                        "type": "status",
+                        "batch_id": batch_id,
+                        "timestamp": utcnow_naive().isoformat(),
+                        **status,
+                    }
+                )
+            except Exception as exc:
+                logger.warning("WebSocket 批量状态发送失败: %s", exc)
 
     def get_batch_status(self, batch_id: str) -> Optional[dict]:
         """获取批量任务状态"""
-        return _batch_status.get(batch_id)
+        with _batch_status_lock:
+            status = _batch_status.get(batch_id)
+            return dict(status) if status else None
 
     def get_batch_logs(self, batch_id: str) -> List[str]:
         """获取批量任务日志"""
@@ -336,15 +410,17 @@ class TaskManager:
 
     def is_batch_cancelled(self, batch_id: str) -> bool:
         """检查批量任务是否已取消"""
-        status = _batch_status.get(batch_id, {})
+        with _batch_status_lock:
+            status = _batch_status.get(batch_id, {})
         return status.get("cancelled", False)
 
     def cancel_batch(self, batch_id: str):
         """取消批量任务"""
-        if batch_id in _batch_status:
-            _batch_status[batch_id]["cancelled"] = True
-            _batch_status[batch_id]["status"] = "cancelling"
-            logger.info(f"批量任务 {batch_id} 已标记为取消")
+        with _batch_status_lock:
+            if batch_id in _batch_status:
+                _batch_status[batch_id]["cancelled"] = True
+                _batch_status[batch_id]["status"] = "cancelling"
+                logger.info(f"批量任务 {batch_id} 已标记为取消")
 
     def register_batch_websocket(self, batch_id: str, websocket):
         """注册批量任务 WebSocket 连接"""
@@ -355,9 +431,8 @@ class TaskManager:
             # 避免重复注册同一个连接
             if websocket not in _ws_connections[key]:
                 _ws_connections[key].append(websocket)
-                # 记录已发送的日志数量，用于发送历史日志时避免重复
-                with _get_batch_lock(batch_id):
-                    _ws_sent_index[key][id(websocket)] = len(_batch_logs.get(batch_id, []))
+                # 新连接默认补发当前全部历史日志，前端负责按消息去重。
+                _ws_sent_index[key][id(websocket)] = 0
                 logger.info(f"批量任务 WebSocket 连接已注册，批量频道开始集合: {batch_id}")
             else:
                 logger.warning(f"批量任务 WebSocket 连接已存在，跳过重复注册: {batch_id}")

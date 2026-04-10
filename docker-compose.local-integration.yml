@@ -17,6 +17,9 @@ services:
       - LOG_LEVEL=info
       - WEBUI_ACCESS_PASSWORD=admin123
     volumes:
-      - /tmp/codex-console-local-integration/data:/app/data
-      - /tmp/codex-console-local-integration/logs:/app/logs
+      - ./data-local/data:/app/data
+      - ./data-local/logs:/app/logs
+      - ./src:/app/src
+      - ./static:/app/static
+      - ./templates:/app/templates
     restart: unless-stopped
