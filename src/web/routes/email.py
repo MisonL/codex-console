@@ -1,4 +1,4 @@
-﻿"""
+"""
 邮箱服务配置 API 路由
 """
 
@@ -106,8 +106,15 @@ def normalize_email_service_config(service_type: str, config: Optional[Dict[str,
         if normalized.get("default_domain") and not normalized.get("domain"):
             normalized["domain"] = normalized.pop("default_domain")
 
-    if service_type == "cloudmail" and normalized.get("api_key") and not normalized.get("admin_password"):
-        normalized["admin_password"] = normalized.pop("api_key")
+    # 增强 CloudMail 字段映射，处理多语言或不同入口的键名
+    if service_type == "cloudmail":
+        # 统一将各种可能的管理员密码字段映射到 admin_password
+        pwd = normalized.get("admin_password") or normalized.get("api_key") or normalized.get("管理员密码")
+        if pwd:
+            normalized["admin_password"] = pwd
+            # 移除冗余字段
+            normalized.pop("api_key", None)
+            normalized.pop("管理员密码", None)
 
     return normalized
 
@@ -171,7 +178,7 @@ def service_to_response(service: EmailServiceModel) -> EmailServiceResponse:
 # ============== API Endpoints ==============
 
 @router.get("/stats")
-async def get_email_services_stats():
+def get_email_services_stats():
     """获取邮箱服务统计信息"""
     with get_db() as db:
         # 按类型统计
@@ -235,7 +242,7 @@ async def get_email_services_stats():
 
 
 @router.get("/types")
-async def get_service_types():
+def get_service_types():
     """获取支持的邮箱服务类型"""
     return {
         "types": [
@@ -355,7 +362,7 @@ async def get_service_types():
 
 
 @router.get("", response_model=EmailServiceListResponse)
-async def list_email_services(
+def list_email_services(
     service_type: Optional[str] = Query(None, description="服务类型筛选"),
     enabled_only: bool = Query(False, description="只显示启用的服务"),
 ):
@@ -378,7 +385,7 @@ async def list_email_services(
 
 
 @router.get("/{service_id}", response_model=EmailServiceResponse)
-async def get_email_service(service_id: int):
+def get_email_service(service_id: int):
     """获取单个邮箱服务详情"""
     with get_db() as db:
         service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
@@ -388,7 +395,7 @@ async def get_email_service(service_id: int):
 
 
 @router.get("/{service_id}/full")
-async def get_email_service_full(service_id: int):
+def get_email_service_full(service_id: int):
     """获取单个邮箱服务完整详情（包含敏感字段，用于编辑）"""
     with get_db() as db:
         service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
@@ -409,7 +416,7 @@ async def get_email_service_full(service_id: int):
 
 
 @router.post("", response_model=EmailServiceResponse)
-async def create_email_service(request: EmailServiceCreate):
+def create_email_service(request: EmailServiceCreate):
     """创建邮箱服务配置"""
     # 验证服务类型
     try:
@@ -438,7 +445,7 @@ async def create_email_service(request: EmailServiceCreate):
 
 
 @router.patch("/{service_id}", response_model=EmailServiceResponse)
-async def update_email_service(service_id: int, request: EmailServiceUpdate):
+def update_email_service(service_id: int, request: EmailServiceUpdate):
     """更新邮箱服务配置"""
     with get_db() as db:
         service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
@@ -474,7 +481,7 @@ async def update_email_service(service_id: int, request: EmailServiceUpdate):
 
 
 @router.delete("/{service_id}")
-async def delete_email_service(service_id: int):
+def delete_email_service(service_id: int):
     """删除邮箱服务配置"""
     with get_db() as db:
         service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
@@ -488,7 +495,7 @@ async def delete_email_service(service_id: int):
 
 
 @router.post("/{service_id}/test", response_model=ServiceTestResult)
-async def test_email_service(service_id: int):
+def test_email_service(service_id: int):
     """测试邮箱服务是否可用"""
     with get_db() as db:
         service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
@@ -526,7 +533,7 @@ async def test_email_service(service_id: int):
 
 
 @router.post("/{service_id}/enable")
-async def enable_email_service(service_id: int):
+def enable_email_service(service_id: int):
     """启用邮箱服务"""
     with get_db() as db:
         service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
@@ -540,7 +547,7 @@ async def enable_email_service(service_id: int):
 
 
 @router.post("/{service_id}/disable")
-async def disable_email_service(service_id: int):
+def disable_email_service(service_id: int):
     """禁用邮箱服务"""
     with get_db() as db:
         service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
@@ -554,7 +561,7 @@ async def disable_email_service(service_id: int):
 
 
 @router.post("/reorder")
-async def reorder_services(service_ids: List[int]):
+def reorder_services(service_ids: List[int]):
     """重新排序邮箱服务优先级"""
     with get_db() as db:
         for index, service_id in enumerate(service_ids):
@@ -568,7 +575,7 @@ async def reorder_services(service_ids: List[int]):
 
 
 @router.post("/outlook/batch-import", response_model=OutlookBatchImportResponse)
-async def batch_import_outlook(request: OutlookBatchImportRequest):
+def batch_import_outlook(request: OutlookBatchImportRequest):
     """
     批量导入 Outlook 邮箱账户
 
@@ -671,7 +678,7 @@ async def batch_import_outlook(request: OutlookBatchImportRequest):
 
 
 @router.delete("/outlook/batch")
-async def batch_delete_outlook(service_ids: List[int]):
+def batch_delete_outlook(service_ids: List[int]):
     """批量删除 Outlook 邮箱服务"""
     deleted = 0
     with get_db() as db:
@@ -698,7 +705,7 @@ class TempmailTestRequest(BaseModel):
 
 
 @router.post("/test-tempmail")
-async def test_tempmail_service(request: TempmailTestRequest):
+def test_tempmail_service(request: TempmailTestRequest):
     """测试临时邮箱服务是否可用"""
     try:
         settings = get_settings()

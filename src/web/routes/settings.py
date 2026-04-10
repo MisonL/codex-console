@@ -4,9 +4,11 @@
 
 import logging
 import os
-from typing import Optional
+import time
+from typing import Any, Callable, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 
 from ...config.settings import get_settings, update_settings
@@ -15,12 +17,41 @@ from ...core.auto_registration import (
     trigger_auto_registration_check,
     update_auto_registration_state,
 )
+from ...core.proxy_utils import (
+    build_requests_proxy_map,
+    diagnose_proxy_failure,
+    is_retryable_proxy_probe,
+    normalize_proxy_url,
+    split_proxy_components,
+)
 from ...database import crud
 from ...database.session import get_db
 from ...services import EmailServiceType
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_PROXY_EXIT_IP_TEST_URL = "https://api.ipify.org?format=json"
+_PROXY_EXIT_IP_FALLBACK_URLS = (
+    _PROXY_EXIT_IP_TEST_URL,
+    "https://api64.ipify.org?format=json",
+    "https://ifconfig.me/ip",
+)
+_PROXY_OPENAI_TEST_URL = "https://auth.openai.com"
+_PROXY_TEST_TIMEOUT_SECONDS = 8
+_PROXY_TEST_MAX_ATTEMPTS = 2
+_PROXY_TEST_RETRY_DELAY_SECONDS = 0.35
+_PROXY_SERVER_PUBLIC_IP_CACHE_TTL_SECONDS = 60
+_PROXY_CURL_CFFI_INCOMPATIBLE_MESSAGE = "curl_cffi 代理探测失败，但标准 requests 验证成功，疑似 curl_cffi TLS 仿真与代理网关不兼容。"
+_NON_FATAL_OPENAI_DIAGNOSIS_CODES = {"target_forbidden"}
+_PROXY_LEAK_WARNING_MESSAGE = "警告：代理未生效，当前检测到的是服务器真实 IP，请检查代理配置格式。"
+_PROXY_SERVER_IP_UNAVAILABLE_MESSAGE = "无法确认服务器公网 IP，已拒绝将当前代理判定为成功，请先检查服务器直连网络。"
+_PROXY_EXIT_IP_MISSING_MESSAGE = "代理探测未返回可识别的出口 IP，已拒绝将当前代理判定为成功。"
+
+_server_public_ip_cache: Dict[str, Any] = {
+    "value": "",
+    "expires_at": 0.0,
+}
 
 
 # ============== Pydantic Models ==============
@@ -92,10 +123,652 @@ class AutoQuickRefreshSettingsRequest(BaseModel):
     run_now: bool = False
 
 
+def _normalize_proxy_payload(
+    proxy_type: Optional[str],
+    host: Optional[str],
+    port: Optional[int],
+    username: Optional[str],
+    password: Optional[str],
+) -> Dict[str, Any]:
+    try:
+        return split_proxy_components(proxy_type, host, port, username, password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _request_via_curl_cffi(target_url: str, proxies: Optional[Dict[str, str]]):
+    from curl_cffi import requests as cffi_requests
+
+    proxy_url = ""
+    if isinstance(proxies, dict):
+        proxy_url = str(proxies.get("https") or proxies.get("http") or "").strip()
+
+    request_kwargs: Dict[str, Any] = {
+        "timeout": _PROXY_TEST_TIMEOUT_SECONDS,
+        "impersonate": "chrome120",
+        "allow_redirects": False,
+    }
+    if proxy_url:
+        # curl_cffi 在带认证代理上优先使用单值 proxy 参数，避免字典映射被底层忽略。
+        request_kwargs["proxy"] = proxy_url
+    elif proxies:
+        request_kwargs["proxies"] = proxies
+
+    return cffi_requests.get(
+        target_url,
+        **request_kwargs,
+    )
+
+
+def _request_via_requests(target_url: str, proxies: Optional[Dict[str, str]]):
+    import requests
+
+    with requests.Session() as session:
+        # 禁用环境变量代理，避免 NO_PROXY / HTTP_PROXY 覆盖显式配置导致误判为直连。
+        session.trust_env = False
+        return session.get(
+            target_url,
+            proxies=proxies,
+            timeout=_PROXY_TEST_TIMEOUT_SECONDS,
+            allow_redirects=False,
+        )
+
+
+def _probe_proxy_with_transport(
+    proxy_url: str,
+    target_url: str,
+    label: str,
+    transport_name: str,
+    request_func: Callable[[str, Optional[Dict[str, str]]], Any],
+    *,
+    retryable: bool = True,
+) -> Dict[str, Any]:
+    proxies = build_requests_proxy_map(proxy_url)
+    if not proxies:
+        return {
+            "name": label,
+            "url": target_url,
+            "transport": transport_name,
+            "success": False,
+            "diagnosis_code": "invalid_proxy_url",
+            "message": "代理地址格式无效，请检查协议、主机、端口和认证信息。",
+        }
+    last_result: Dict[str, Any] = {}
+    max_attempts = _PROXY_TEST_MAX_ATTEMPTS if retryable else 1
+
+    for attempt in range(1, max_attempts + 1):
+        started = time.time()
+        try:
+            response = request_func(target_url, proxies)
+            elapsed_ms = round((time.time() - started) * 1000)
+            if response.status_code < 400:
+                return {
+                    "name": label,
+                    "url": target_url,
+                    "transport": transport_name,
+                    "success": True,
+                    "status_code": response.status_code,
+                    "elapsed_ms": elapsed_ms,
+                    "response": response,
+                }
+
+            diagnosis = diagnose_proxy_failure(
+                status_code=response.status_code,
+                target_url=target_url,
+            )
+            last_result = {
+                "name": label,
+                "url": target_url,
+                "transport": transport_name,
+                "success": False,
+                "status_code": response.status_code,
+                "elapsed_ms": elapsed_ms,
+                "diagnosis_code": diagnosis["code"],
+                "message": diagnosis["message"],
+            }
+            if attempt < max_attempts and is_retryable_proxy_probe(response.status_code, None):
+                time.sleep(_PROXY_TEST_RETRY_DELAY_SECONDS * attempt)
+                continue
+            return last_result
+        except Exception as exc:
+            elapsed_ms = round((time.time() - started) * 1000)
+            diagnosis = diagnose_proxy_failure(
+                error_message=str(exc),
+                target_url=target_url,
+            )
+            last_result = {
+                "name": label,
+                "url": target_url,
+                "transport": transport_name,
+                "success": False,
+                "elapsed_ms": elapsed_ms,
+                "diagnosis_code": diagnosis["code"],
+                "message": diagnosis["message"],
+                "error": str(exc),
+            }
+            if attempt < max_attempts and is_retryable_proxy_probe(None, str(exc)):
+                time.sleep(_PROXY_TEST_RETRY_DELAY_SECONDS * attempt)
+                continue
+            return last_result
+
+    return last_result
+
+
+def _is_proxy_connect_aborted_error(*probe_results: Dict[str, Any]) -> bool:
+    markers = ("curl: (56)", "(56)", "proxy connect aborted")
+    for probe in probe_results:
+        text = " ".join(
+            str(part or "")
+            for part in (
+                probe.get("error"),
+                probe.get("message"),
+                probe.get("diagnosis_code"),
+            )
+        ).lower()
+        if any(marker in text for marker in markers):
+            return True
+    return False
+
+
+def _resolve_server_public_ip() -> str:
+    try:
+        import requests
+    except Exception:
+        return ""
+
+    now = time.time()
+    cached_ip = str(_server_public_ip_cache.get("value") or "").strip()
+    cache_expires_at = float(_server_public_ip_cache.get("expires_at") or 0.0)
+    if cached_ip and cache_expires_at > now:
+        return cached_ip
+
+    try:
+        with requests.Session() as session:
+            # 必须直连获取服务器公网 IP，避免被环境代理污染泄漏判定。
+            session.trust_env = False
+            for target_url in _PROXY_EXIT_IP_FALLBACK_URLS:
+                try:
+                    response = session.get(
+                        target_url,
+                        timeout=_PROXY_TEST_TIMEOUT_SECONDS,
+                        allow_redirects=False,
+                    )
+                except Exception:
+                    continue
+                if response.status_code >= 400:
+                    continue
+                ip = _extract_ip_from_response(response)
+                if ip:
+                    _server_public_ip_cache["value"] = ip
+                    _server_public_ip_cache["expires_at"] = now + _PROXY_SERVER_PUBLIC_IP_CACHE_TTL_SECONDS
+                    return ip
+    except Exception:
+        return ""
+    return ""
+
+
+def _append_webshare_ip_hint(message: str) -> str:
+    server_ip = _resolve_server_public_ip()
+    if server_ip:
+        hint = f"请检查 Webshare 后台是否已授权当前服务器 IP ({server_ip})"
+    else:
+        hint = "请检查 Webshare 后台是否已授权当前服务器 IP"
+    if hint in message:
+        return message
+    if not message:
+        return hint
+    return f"{message}；{hint}"
+
+
+def _safe_normalize_proxy_url(proxy_url: str) -> str:
+    try:
+        normalized = normalize_proxy_url(proxy_url)
+    except Exception:
+        normalized = None
+    return normalized or str(proxy_url or "")
+
+
+def _classify_proxy_exception(error_text: str, target_url: str = "") -> Dict[str, str]:
+    diagnosis = diagnose_proxy_failure(
+        error_message=error_text,
+        target_url=target_url,
+    )
+    diagnosis_code = str(diagnosis.get("code") or "proxy_error")
+    message = str(diagnosis.get("message") or "代理连接失败")
+
+    if _is_proxy_connect_aborted_error(
+        {"error": error_text, "message": message, "diagnosis_code": diagnosis_code}
+    ):
+        diagnosis_code = "proxy_connect_aborted"
+        message = _append_webshare_ip_hint(message)
+
+    return {
+        "diagnosis_code": diagnosis_code,
+        "message": message,
+    }
+
+
+def _sanitize_proxy_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "response":
+                continue
+            cleaned[key] = _sanitize_proxy_payload(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_sanitize_proxy_payload(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _json_safe_proxy_payload(value: Any) -> Any:
+    sanitized = _sanitize_proxy_payload(value)
+    try:
+        return jsonable_encoder(sanitized)
+    except Exception:
+        return sanitized
+
+
+def _extract_ip_from_response(response: Any) -> str:
+    if response is None:
+        return ""
+
+    payload: Dict[str, Any] = {}
+    try:
+        parsed = response.json() if hasattr(response, "json") else {}
+        if isinstance(parsed, dict):
+            payload = parsed
+    except Exception:
+        payload = {}
+
+    for key in ("ip", "query", "origin"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value.split(",")[0].strip()
+
+    text = str(getattr(response, "text", "") or "").strip()
+    if not text:
+        return ""
+    return text.split(",")[0].strip()
+
+
+def _safe_isoformat_datetime(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    iso_fn = getattr(value, "isoformat", None)
+    if callable(iso_fn):
+        try:
+            return str(iso_fn())
+        except Exception:
+            pass
+    text = str(value).strip()
+    return text or None
+
+
+def _safe_parse_proxy_port(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _safe_parse_int(value: Any, default: int = 0) -> int:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def _safe_proxy_to_dict(proxy: Any, include_password: bool = False) -> Dict[str, Any]:
+    try:
+        payload = proxy.to_dict(include_password=include_password)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        logger.exception(
+            "Proxy serialization failed, fallback to safe serializer",
+            extra={"proxy_id": getattr(proxy, "id", None)},
+        )
+
+    raw_type = getattr(proxy, "type", "http")
+    raw_host = getattr(proxy, "host", "")
+    raw_port = getattr(proxy, "port", None)
+    raw_username = getattr(proxy, "username", None)
+    raw_password = getattr(proxy, "password", None)
+
+    try:
+        normalized = split_proxy_components(raw_type, raw_host, raw_port, raw_username, raw_password)
+    except Exception:
+        normalized = {
+            "type": str(raw_type or "http").strip() or "http",
+            "host": str(raw_host or "").strip(),
+            "port": _safe_parse_proxy_port(raw_port),
+            "username": str(raw_username or "").strip() or None,
+            "password": str(raw_password or "").strip() or None,
+        }
+
+    result: Dict[str, Any] = {
+        "id": getattr(proxy, "id", None),
+        "name": str(getattr(proxy, "name", "") or ""),
+        "type": str(normalized.get("type") or "http"),
+        "host": str(normalized.get("host") or ""),
+        "port": normalized.get("port"),
+        "username": normalized.get("username"),
+        "enabled": bool(getattr(proxy, "enabled", False)),
+        "is_default": bool(getattr(proxy, "is_default", False)),
+        "priority": _safe_parse_int(getattr(proxy, "priority", 0), 0),
+        "last_used": _safe_isoformat_datetime(getattr(proxy, "last_used", None)),
+        "created_at": _safe_isoformat_datetime(getattr(proxy, "created_at", None)),
+        "updated_at": _safe_isoformat_datetime(getattr(proxy, "updated_at", None)),
+    }
+    if include_password:
+        result["password"] = normalized.get("password")
+    else:
+        result["has_password"] = bool(normalized.get("password"))
+    return _json_safe_proxy_payload(result)
+
+
+def _finalize_proxy_diagnostics_result(proxy_url: str, result: Any) -> Dict[str, Any]:
+    normalized_proxy_url = _safe_normalize_proxy_url(proxy_url)
+    if not isinstance(result, dict):
+        return {
+            "success": False,
+            "proxy_url": normalized_proxy_url,
+            "message": "代理诊断返回了非预期结果，请查看后端日志。",
+            "diagnosis_code": "proxy_diagnostics_invalid_payload",
+            "probes": [],
+        }
+
+    payload: Dict[str, Any] = dict(result)
+    payload.pop("response", None)
+
+    success = bool(payload.get("success"))
+    payload["success"] = success
+    payload["proxy_url"] = str(payload.get("proxy_url") or normalized_proxy_url)
+
+    message = str(payload.get("message") or ("代理连接成功" if success else "代理连接失败")).strip()
+    diagnosis_code = str(payload.get("diagnosis_code") or ("proxy_ok" if success else "proxy_error")).strip()
+    error_text = str(payload.get("error") or "").strip()
+
+    if (not success) and _is_proxy_connect_aborted_error(
+        {"error": error_text, "message": message, "diagnosis_code": diagnosis_code}
+    ):
+        diagnosis_code = "proxy_connect_aborted"
+        message = _append_webshare_ip_hint(
+            "代理连接在 CONNECT 阶段被中止，请优先检查代理地址格式、认证信息和供应商侧策略。"
+        )
+
+    payload["message"] = message
+    payload["diagnosis_code"] = diagnosis_code
+
+    probes = payload.get("probes")
+    payload["probes"] = probes if isinstance(probes, list) else []
+
+    response_time = payload.get("response_time")
+    if success:
+        ip = str(payload.get("ip") or "").strip() or "unknown"
+        if not message:
+            message = f"代理连接成功，出口 IP: {ip}"
+        if response_time is not None and "响应时间" not in message:
+            message = f"{message}，响应时间: {response_time}ms"
+        payload["message"] = message
+
+    if error_text:
+        payload["error"] = error_text
+    else:
+        payload.pop("error", None)
+
+    return _json_safe_proxy_payload(payload)
+
+
+def _build_proxy_route_error_result(proxy_url: str, exc: Exception, fallback_code: str) -> Dict[str, Any]:
+    error_text = str(exc) or repr(exc)
+    classified = _classify_proxy_exception(error_text)
+    diagnosis_code = classified["diagnosis_code"]
+    message = classified["message"]
+    if diagnosis_code == "proxy_error":
+        diagnosis_code = fallback_code
+        message = "代理测试失败，请检查后端日志。"
+    return _finalize_proxy_diagnostics_result(
+        proxy_url,
+        {
+            "success": False,
+            "proxy_url": _safe_normalize_proxy_url(proxy_url),
+            "message": message,
+            "diagnosis_code": diagnosis_code,
+            "error": error_text,
+            "probes": [],
+        },
+    )
+
+
+def _safe_run_proxy_diagnostics(proxy_url: str) -> Dict[str, Any]:
+    try:
+        result = _run_proxy_diagnostics(proxy_url)
+    except Exception as exc:
+        logger.exception("Proxy diagnostics crashed unexpectedly", extra={"proxy_url": proxy_url})
+        return _build_proxy_route_error_result(proxy_url, exc, "proxy_diagnostics_unhandled_exception")
+    return _finalize_proxy_diagnostics_result(proxy_url, result)
+
+
+def _probe_proxy_endpoint(proxy_url: str, target_url: str, label: str) -> Dict[str, Any]:
+    try:
+        cffi_probe = _probe_proxy_with_transport(
+            proxy_url,
+            target_url,
+            label,
+            "curl_cffi",
+            _request_via_curl_cffi,
+            retryable=True,
+        )
+        if cffi_probe.get("success"):
+            return cffi_probe
+
+        requests_probe = _probe_proxy_with_transport(
+            proxy_url,
+            target_url,
+            label,
+            "requests",
+            _request_via_requests,
+            retryable=False,
+        )
+        cffi_probe_view = dict(cffi_probe)
+        cffi_probe_view.pop("response", None)
+
+        if requests_probe.get("success"):
+            merged = dict(requests_probe)
+            merged["diagnosis_code"] = "curl_cffi_tls_incompatible"
+            merged["message"] = _PROXY_CURL_CFFI_INCOMPATIBLE_MESSAGE
+            merged["fallback_probe"] = cffi_probe_view
+            return merged
+
+        message = requests_probe.get("message") or cffi_probe.get("message") or "代理连接失败"
+        diagnosis_code = requests_probe.get("diagnosis_code") or cffi_probe.get("diagnosis_code") or "proxy_error"
+        if _is_proxy_connect_aborted_error(cffi_probe, requests_probe):
+            message = _append_webshare_ip_hint(message)
+
+        return {
+            "name": label,
+            "url": target_url,
+            "transport": requests_probe.get("transport") or "requests",
+            "success": False,
+            "status_code": requests_probe.get("status_code") or cffi_probe.get("status_code"),
+            "elapsed_ms": requests_probe.get("elapsed_ms") or cffi_probe.get("elapsed_ms"),
+            "diagnosis_code": diagnosis_code,
+            "message": message,
+            "error": requests_probe.get("error") or cffi_probe.get("error"),
+            "fallback_probe": cffi_probe_view,
+        }
+    except Exception as exc:
+        logger.exception(
+            "Proxy endpoint probe failed unexpectedly",
+            extra={
+                "proxy_url": proxy_url,
+                "target_url": target_url,
+                "probe_label": label,
+            },
+        )
+        error_text = str(exc) or repr(exc)
+        classified = _classify_proxy_exception(error_text, target_url)
+        diagnosis_code = classified["diagnosis_code"]
+        if diagnosis_code == "proxy_error":
+            diagnosis_code = "proxy_probe_exception"
+        return {
+            "name": label,
+            "url": target_url,
+            "transport": "unknown",
+            "success": False,
+            "diagnosis_code": diagnosis_code,
+            "message": classified["message"],
+            "error": error_text,
+        }
+
+
+def _append_probe_result(probes: list[Dict[str, Any]], probe_result: Dict[str, Any]) -> None:
+    fallback_probe = probe_result.get("fallback_probe")
+    if isinstance(fallback_probe, dict):
+        fallback_view = dict(fallback_probe)
+        fallback_view.pop("response", None)
+        probes.append(fallback_view)
+    probe_view = dict(probe_result)
+    probe_view.pop("response", None)
+    probe_view.pop("fallback_probe", None)
+    probes.append(probe_view)
+
+
+def _run_proxy_diagnostics(proxy_url: str) -> Dict[str, Any]:
+    probes: list[Dict[str, Any]] = []
+    normalized_proxy_url = ""
+    try:
+        normalized_proxy_url = normalize_proxy_url(proxy_url)
+        if not normalized_proxy_url:
+            return {
+                "success": False,
+                "message": "代理地址格式无效，请检查协议、主机、端口和认证信息。",
+                "diagnosis_code": "invalid_proxy_url",
+            }
+
+        exit_probe = _probe_proxy_endpoint(normalized_proxy_url, _PROXY_EXIT_IP_TEST_URL, "exit_ip")
+        auth_probe: Optional[Dict[str, Any]] = None
+        _append_probe_result(probes, exit_probe)
+
+        if not exit_probe.get("success"):
+            return {
+                "success": False,
+                "proxy_url": normalized_proxy_url,
+                "message": exit_probe.get("message") or "代理连接失败",
+                "diagnosis_code": exit_probe.get("diagnosis_code") or "proxy_error",
+                "response_time": exit_probe.get("elapsed_ms"),
+                "probes": probes,
+            }
+
+        ip = ""
+        response = exit_probe.get("response")
+        if response is not None:
+            ip = _extract_ip_from_response(response)
+
+        if not ip:
+            return {
+                "success": False,
+                "proxy_url": normalized_proxy_url,
+                "response_time": exit_probe.get("elapsed_ms"),
+                "message": _PROXY_EXIT_IP_MISSING_MESSAGE,
+                "diagnosis_code": "proxy_exit_ip_missing",
+                "probes": probes,
+            }
+
+        server_public_ip = _resolve_server_public_ip()
+        if not server_public_ip:
+            return {
+                "success": False,
+                "proxy_url": normalized_proxy_url,
+                "ip": ip,
+                "response_time": exit_probe.get("elapsed_ms"),
+                "message": _PROXY_SERVER_IP_UNAVAILABLE_MESSAGE,
+                "diagnosis_code": "server_public_ip_unavailable",
+                "probes": probes,
+            }
+        if ip and server_public_ip and ip == server_public_ip:
+            return {
+                "success": False,
+                "proxy_url": normalized_proxy_url,
+                "ip": ip,
+                "server_ip": server_public_ip,
+                "response_time": exit_probe.get("elapsed_ms"),
+                "message": _PROXY_LEAK_WARNING_MESSAGE,
+                "diagnosis_code": "proxy_leak_detected",
+                "probes": probes,
+            }
+
+        auth_probe = _probe_proxy_endpoint(normalized_proxy_url, _PROXY_OPENAI_TEST_URL, "openai_auth")
+        _append_probe_result(probes, auth_probe)
+
+        if auth_probe.get("success"):
+            message = f"代理连接成功，出口 IP: {ip or 'unknown'}"
+            return {
+                "success": True,
+                "proxy_url": normalized_proxy_url,
+                "ip": ip,
+                "response_time": exit_probe.get("elapsed_ms"),
+                "message": message,
+                "probes": probes,
+            }
+
+        failure_message = auth_probe.get("message") or "代理访问 OpenAI 认证站点失败"
+        if ip:
+            failure_message = f"代理出口可用，出口 IP: {ip}；但访问 OpenAI 认证站点失败。{failure_message}"
+            auth_diagnosis_code = str(auth_probe.get("diagnosis_code") or "")
+            if auth_diagnosis_code in _NON_FATAL_OPENAI_DIAGNOSIS_CODES:
+                return {
+                    "success": True,
+                    "proxy_url": normalized_proxy_url,
+                    "ip": ip,
+                    "response_time": exit_probe.get("elapsed_ms"),
+                    "message": failure_message,
+                    "diagnosis_code": "proxy_exit_ip_only",
+                    "warning_diagnosis_code": auth_diagnosis_code,
+                    "probes": probes,
+                }
+        return {
+            "success": False,
+            "proxy_url": normalized_proxy_url,
+            "ip": ip,
+            "response_time": auth_probe.get("elapsed_ms") or exit_probe.get("elapsed_ms"),
+            "message": failure_message,
+            "diagnosis_code": auth_probe.get("diagnosis_code") or "target_url_rejected",
+            "probes": probes,
+        }
+    except Exception as exc:
+        logger.exception("Proxy diagnostics failed", extra={"proxy_url": proxy_url})
+        error_text = str(exc) or repr(exc)
+        classified = _classify_proxy_exception(error_text)
+        diagnosis_code = classified["diagnosis_code"]
+        if diagnosis_code == "proxy_error":
+            diagnosis_code = "proxy_diagnostics_exception"
+            message = "代理诊断执行失败，请检查后端日志。"
+        else:
+            message = classified["message"]
+        return {
+            "success": False,
+            "proxy_url": normalized_proxy_url or _safe_normalize_proxy_url(proxy_url),
+            "message": message,
+            "diagnosis_code": diagnosis_code,
+            "error": error_text,
+            "probes": probes,
+        }
+
+
 # ============== API Endpoints ==============
 
 @router.get("")
-async def get_all_settings():
+def get_all_settings():
     """获取所有设置"""
     settings = get_settings()
 
@@ -167,7 +840,7 @@ async def get_all_settings():
 
 
 @router.get("/auto-quick-refresh")
-async def get_auto_quick_refresh_settings():
+def get_auto_quick_refresh_settings():
     settings = get_settings()
     from ..auto_quick_refresh_scheduler import auto_quick_refresh_scheduler
 
@@ -181,7 +854,7 @@ async def get_auto_quick_refresh_settings():
 
 
 @router.post("/auto-quick-refresh")
-async def update_auto_quick_refresh_settings(request: AutoQuickRefreshSettingsRequest):
+def update_auto_quick_refresh_settings(request: AutoQuickRefreshSettingsRequest):
     from ..auto_quick_refresh_scheduler import (
         AUTO_MAX_RETRY_LIMIT,
         AUTO_MAX_INTERVAL_MINUTES,
@@ -223,7 +896,7 @@ async def update_auto_quick_refresh_settings(request: AutoQuickRefreshSettingsRe
 
 
 @router.get("/proxy/dynamic")
-async def get_dynamic_proxy_settings():
+def get_dynamic_proxy_settings():
     """获取动态代理设置"""
     settings = get_settings()
     return {
@@ -245,7 +918,7 @@ class DynamicProxySettings(BaseModel):
 
 
 @router.post("/proxy/dynamic")
-async def update_dynamic_proxy_settings(request: DynamicProxySettings):
+def update_dynamic_proxy_settings(request: DynamicProxySettings):
     """更新动态代理设置"""
     update_dict = {
         "proxy_dynamic_enabled": request.enabled,
@@ -261,7 +934,7 @@ async def update_dynamic_proxy_settings(request: DynamicProxySettings):
 
 
 @router.post("/proxy/dynamic/test")
-async def test_dynamic_proxy(request: DynamicProxySettings):
+def test_dynamic_proxy(request: DynamicProxySettings):
     """测试动态代理 API"""
     from ...core.dynamic_proxy import fetch_dynamic_proxy
 
@@ -275,40 +948,32 @@ async def test_dynamic_proxy(request: DynamicProxySettings):
         if settings.proxy_dynamic_api_key:
             api_key = settings.proxy_dynamic_api_key.get_secret_value()
 
-    proxy_url = fetch_dynamic_proxy(
-        api_url=request.api_url,
-        api_key=api_key,
-        api_key_header=request.api_key_header,
-        result_field=request.result_field,
-    )
+    try:
+        proxy_url = fetch_dynamic_proxy(
+            api_url=request.api_url,
+            api_key=api_key,
+            api_key_header=request.api_key_header,
+            result_field=request.result_field,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Dynamic proxy fetch failed unexpectedly",
+            extra={"api_url": request.api_url},
+        )
+        return _build_proxy_route_error_result(request.api_url, exc, "dynamic_proxy_fetch_exception")
 
     if not proxy_url:
-        return {"success": False, "message": "动态代理 API 返回为空或请求失败"}
+        return _json_safe_proxy_payload({"success": False, "message": "动态代理 API 返回为空或请求失败"})
 
-    # 用获取到的代理测试连通性
-    import time
-    from curl_cffi import requests as cffi_requests
-    try:
-        proxies = {"http": proxy_url, "https": proxy_url}
-        start = time.time()
-        resp = cffi_requests.get(
-            "https://api.ipify.org?format=json",
-            proxies=proxies,
-            timeout=10,
-            impersonate="chrome110"
-        )
-        elapsed = round((time.time() - start) * 1000)
-        if resp.status_code == 200:
-            ip = resp.json().get("ip", "")
-            return {"success": True, "proxy_url": proxy_url, "ip": ip, "response_time": elapsed,
-                    "message": f"动态代理可用，出口 IP: {ip}，响应时间: {elapsed}ms"}
-        return {"success": False, "proxy_url": proxy_url, "message": f"代理连接失败: HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"success": False, "proxy_url": proxy_url, "message": f"代理连接失败: {e}"}
+    result = _safe_run_proxy_diagnostics(proxy_url)
+    if result.get("success"):
+        elapsed = result.get("response_time")
+        result["message"] = f"动态代理可用，出口 IP: {result.get('ip') or 'unknown'}，响应时间: {elapsed}ms"
+    return _json_safe_proxy_payload(result)
 
 
 @router.get("/registration")
-async def get_registration_settings():
+def get_registration_settings():
     """获取注册设置"""
     settings = get_settings()
 
@@ -339,7 +1004,7 @@ async def get_registration_settings():
 
 
 @router.post("/registration")
-async def update_registration_settings(request: RegistrationSettings):
+def update_registration_settings(request: RegistrationSettings):
     """更新注册设置"""
     if request.timeout < 30 or request.timeout > 600:
         raise HTTPException(status_code=400, detail="注册超时时间必须在 30-600 秒之间")
@@ -447,7 +1112,7 @@ async def update_registration_settings(request: RegistrationSettings):
 
 
 @router.post("/webui")
-async def update_webui_settings(request: WebUISettings):
+def update_webui_settings(request: WebUISettings):
     """更新 Web UI 设置"""
     update_dict = {}
     if request.host is not None:
@@ -464,7 +1129,7 @@ async def update_webui_settings(request: WebUISettings):
 
 
 @router.get("/database")
-async def get_database_info():
+def get_database_info():
     """获取数据库信息"""
     settings = get_settings()
 
@@ -496,7 +1161,7 @@ async def get_database_info():
 
 
 @router.post("/database/backup")
-async def backup_database():
+def backup_database():
     """备份数据库"""
     import shutil
     from datetime import datetime
@@ -621,7 +1286,7 @@ async def import_database(file: UploadFile = File(...)):
 
 
 @router.post("/database/cleanup")
-async def cleanup_database(
+def cleanup_database(
     days: int = 30,
     keep_failed: bool = True
 ):
@@ -657,7 +1322,7 @@ async def cleanup_database(
 
 
 @router.get("/logs")
-async def get_recent_logs(
+def get_recent_logs(
     lines: int = 100,
     level: str = "INFO"
 ):
@@ -706,7 +1371,7 @@ class EmailCodeSettings(BaseModel):
 
 
 @router.get("/tempmail")
-async def get_tempmail_settings():
+def get_tempmail_settings():
     """获取临时邮箱设置"""
     settings = get_settings()
 
@@ -729,7 +1394,7 @@ async def get_tempmail_settings():
 
 
 @router.post("/tempmail")
-async def update_tempmail_settings(request: TempmailSettings):
+def update_tempmail_settings(request: TempmailSettings):
     """更新临时邮箱设置"""
     update_dict = {}
 
@@ -754,7 +1419,7 @@ async def update_tempmail_settings(request: TempmailSettings):
 # ============== 验证码等待设置 ==============
 
 @router.get("/email-code")
-async def get_email_code_settings():
+def get_email_code_settings():
     """获取验证码等待设置"""
     settings = get_settings()
     return {
@@ -764,7 +1429,7 @@ async def get_email_code_settings():
 
 
 @router.post("/email-code")
-async def update_email_code_settings(request: EmailCodeSettings):
+def update_email_code_settings(request: EmailCodeSettings):
     """更新验证码等待设置"""
     # 验证参数范围
     if request.timeout < 30 or request.timeout > 600:
@@ -807,74 +1472,93 @@ class ProxyUpdateRequest(BaseModel):
 
 
 @router.get("/proxies")
-async def get_proxies_list(enabled: Optional[bool] = None):
+def get_proxies_list(enabled: Optional[bool] = None):
     """获取代理列表"""
     with get_db() as db:
         proxies = crud.get_proxies(db, enabled=enabled)
-        return {
-            "proxies": [p.to_dict() for p in proxies],
+        return _json_safe_proxy_payload({
+            "proxies": [_safe_proxy_to_dict(p) for p in proxies],
             "total": len(proxies)
-        }
+        })
 
 
 @router.post("/proxies")
-async def create_proxy_item(request: ProxyCreateRequest):
+def create_proxy_item(request: ProxyCreateRequest):
     """创建代理"""
+    payload = _normalize_proxy_payload(
+        request.type,
+        request.host,
+        request.port,
+        request.username,
+        request.password,
+    )
     with get_db() as db:
         proxy = crud.create_proxy(
             db,
             name=request.name,
-            type=request.type,
-            host=request.host,
-            port=request.port,
-            username=request.username,
-            password=request.password,
+            type=payload["type"],
+            host=payload["host"],
+            port=payload["port"],
+            username=payload["username"],
+            password=payload["password"],
             enabled=request.enabled,
             priority=request.priority
         )
-        return {"success": True, "proxy": proxy.to_dict()}
+        return _json_safe_proxy_payload({"success": True, "proxy": _safe_proxy_to_dict(proxy)})
 
 
 @router.get("/proxies/{proxy_id}")
-async def get_proxy_item(proxy_id: int):
+def get_proxy_item(proxy_id: int):
     """获取单个代理"""
     with get_db() as db:
         proxy = crud.get_proxy_by_id(db, proxy_id)
         if not proxy:
             raise HTTPException(status_code=404, detail="代理不存在")
-        return proxy.to_dict(include_password=True)
+        return _json_safe_proxy_payload(_safe_proxy_to_dict(proxy, include_password=True))
 
 
 @router.patch("/proxies/{proxy_id}")
-async def update_proxy_item(proxy_id: int, request: ProxyUpdateRequest):
+def update_proxy_item(proxy_id: int, request: ProxyUpdateRequest):
     """更新代理"""
     with get_db() as db:
+        existing_proxy = crud.get_proxy_by_id(db, proxy_id)
+        if not existing_proxy:
+            raise HTTPException(status_code=404, detail="代理不存在")
+
         update_data = {}
         if request.name is not None:
             update_data["name"] = request.name
-        if request.type is not None:
-            update_data["type"] = request.type
-        if request.host is not None:
-            update_data["host"] = request.host
-        if request.port is not None:
-            update_data["port"] = request.port
-        if request.username is not None:
-            update_data["username"] = request.username
-        if request.password is not None:
-            update_data["password"] = request.password
         if request.enabled is not None:
             update_data["enabled"] = request.enabled
         if request.priority is not None:
             update_data["priority"] = request.priority
 
+        if any(
+            value is not None
+            for value in (
+                request.type,
+                request.host,
+                request.port,
+                request.username,
+                request.password,
+            )
+        ):
+            host_supplies_auth = bool(request.host is not None and "://" in str(request.host))
+            normalized = _normalize_proxy_payload(
+                request.type if request.type is not None else existing_proxy.type,
+                request.host if request.host is not None else existing_proxy.host,
+                request.port if request.port is not None else existing_proxy.port,
+                request.username if request.username is not None else (None if host_supplies_auth else existing_proxy.username),
+                request.password if request.password is not None else (None if host_supplies_auth else existing_proxy.password),
+            )
+            update_data.update(normalized)
+
         proxy = crud.update_proxy(db, proxy_id, **update_data)
-        if not proxy:
-            raise HTTPException(status_code=404, detail="代理不存在")
-        return {"success": True, "proxy": proxy.to_dict()}
+        return _json_safe_proxy_payload({"success": True, "proxy": _safe_proxy_to_dict(proxy)})
 
 
 @router.delete("/proxies/{proxy_id}")
-async def delete_proxy_item(proxy_id: int):
+def delete_proxy_item(proxy_id: int):
     """删除代理"""
     with get_db() as db:
         success = crud.delete_proxy(db, proxy_id)
@@ -884,132 +1568,63 @@ async def delete_proxy_item(proxy_id: int):
 
 
 @router.post("/proxies/{proxy_id}/set-default")
-async def set_proxy_default(proxy_id: int):
+def set_proxy_default(proxy_id: int):
     """将指定代理设为默认"""
     with get_db() as db:
         proxy = crud.set_proxy_default(db, proxy_id)
         if not proxy:
             raise HTTPException(status_code=404, detail="代理不存在")
-        return {"success": True, "proxy": proxy.to_dict()}
+        return _json_safe_proxy_payload({"success": True, "proxy": _safe_proxy_to_dict(proxy)})
 
 
 @router.post("/proxies/{proxy_id}/test")
-async def test_proxy_item(proxy_id: int):
+def test_proxy_item(proxy_id: int):
     """测试单个代理"""
-    import time
-    from curl_cffi import requests as cffi_requests
-
-    with get_db() as db:
-        proxy = crud.get_proxy_by_id(db, proxy_id)
-        if not proxy:
-            raise HTTPException(status_code=404, detail="代理不存在")
-
-        proxy_url = proxy.proxy_url
-        test_url = "https://api.ipify.org?format=json"
-        start_time = time.time()
-
-        try:
-            proxies = {
-                "http": proxy_url,
-                "https": proxy_url
-            }
-
-            response = cffi_requests.get(
-                test_url,
-                proxies=proxies,
-                timeout=3,
-                impersonate="chrome110"
-            )
-
-            elapsed_time = time.time() - start_time
-
-            if response.status_code == 200:
-                ip_info = response.json()
-                return {
-                    "success": True,
-                    "ip": ip_info.get("ip", ""),
-                    "response_time": round(elapsed_time * 1000),
-                    "message": f"代理连接成功，出口 IP: {ip_info.get('ip', 'unknown')}"
-                }
-            else:
-                return {
-                    "success": False,
-                    "message": f"代理返回错误状态码: {response.status_code}"
-                }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "message": f"代理连接失败: {str(e)}"
-            }
+    try:
+        with get_db() as db:
+            proxy = crud.get_proxy_by_id(db, proxy_id)
+            if not proxy:
+                raise HTTPException(status_code=404, detail="代理不存在")
+            return _json_safe_proxy_payload(_safe_run_proxy_diagnostics(proxy.proxy_url))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Proxy test route failed unexpectedly", extra={"proxy_id": proxy_id})
+        return _json_safe_proxy_payload(_build_proxy_route_error_result("", exc, "proxy_test_route_exception"))
 
 
 @router.post("/proxies/test-all")
-async def test_all_proxies():
+def test_all_proxies():
     """测试所有启用的代理"""
-    import time
-    from curl_cffi import requests as cffi_requests
+    try:
+        with get_db() as db:
+            proxies = crud.get_enabled_proxies(db)
 
-    with get_db() as db:
-        proxies = crud.get_enabled_proxies(db)
+            results = []
+            for proxy in proxies:
+                result = _safe_run_proxy_diagnostics(proxy.proxy_url)
+                results.append({"id": proxy.id, "name": proxy.name, **result})
 
-        results = []
-        for proxy in proxies:
-            proxy_url = proxy.proxy_url
-            test_url = "https://api.ipify.org?format=json"
-            start_time = time.time()
-
-            try:
-                proxies_dict = {
-                    "http": proxy_url,
-                    "https": proxy_url
-                }
-
-                response = cffi_requests.get(
-                    test_url,
-                    proxies=proxies_dict,
-                    timeout=3,
-                    impersonate="chrome110"
-                )
-
-                elapsed_time = time.time() - start_time
-
-                if response.status_code == 200:
-                    ip_info = response.json()
-                    results.append({
-                        "id": proxy.id,
-                        "name": proxy.name,
-                        "success": True,
-                        "ip": ip_info.get("ip", ""),
-                        "response_time": round(elapsed_time * 1000)
-                    })
-                else:
-                    results.append({
-                        "id": proxy.id,
-                        "name": proxy.name,
-                        "success": False,
-                        "message": f"状态码: {response.status_code}"
-                    })
-
-            except Exception as e:
-                results.append({
-                    "id": proxy.id,
-                    "name": proxy.name,
-                    "success": False,
-                    "message": str(e)
-                })
-
-        success_count = sum(1 for r in results if r["success"])
-        return {
-            "total": len(proxies),
-            "success": success_count,
-            "failed": len(proxies) - success_count,
-            "results": results
-        }
+            success_count = sum(1 for r in results if r.get("success"))
+            return _json_safe_proxy_payload({
+                "total": len(proxies),
+                "success": success_count,
+                "failed": len(proxies) - success_count,
+                "results": results
+            })
+    except Exception as exc:
+        logger.exception("Batch proxy test failed unexpectedly")
+        route_error = _build_proxy_route_error_result("", exc, "proxy_test_all_route_exception")
+        return _json_safe_proxy_payload({
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "results": [route_error],
+        })
 
 
 @router.post("/proxies/{proxy_id}/enable")
-async def enable_proxy(proxy_id: int):
+def enable_proxy(proxy_id: int):
     """启用代理"""
     with get_db() as db:
         proxy = crud.update_proxy(db, proxy_id, enabled=True)
@@ -1019,7 +1634,7 @@ async def enable_proxy(proxy_id: int):
 
 
 @router.post("/proxies/{proxy_id}/disable")
-async def disable_proxy(proxy_id: int):
+def disable_proxy(proxy_id: int):
     """禁用代理"""
     with get_db() as db:
         proxy = crud.update_proxy(db, proxy_id, enabled=False)
@@ -1036,7 +1651,7 @@ class OutlookSettings(BaseModel):
 
 
 @router.get("/outlook")
-async def get_outlook_settings():
+def get_outlook_settings():
     """获取 Outlook 设置"""
     settings = get_settings()
 
@@ -1049,7 +1664,7 @@ async def get_outlook_settings():
 
 
 @router.post("/outlook")
-async def update_outlook_settings(request: OutlookSettings):
+def update_outlook_settings(request: OutlookSettings):
     """更新 Outlook 设置"""
     update_dict = {}
 
@@ -1078,7 +1693,7 @@ class TeamManagerTestRequest(BaseModel):
 
 
 @router.get("/team-manager")
-async def get_team_manager_settings():
+def get_team_manager_settings():
     """获取 Team Manager 设置"""
     settings = get_settings()
     return {
@@ -1089,7 +1704,7 @@ async def get_team_manager_settings():
 
 
 @router.post("/team-manager")
-async def update_team_manager_settings(request: TeamManagerSettings):
+def update_team_manager_settings(request: TeamManagerSettings):
     """更新 Team Manager 设置"""
     update_dict = {
         "tm_enabled": request.enabled,
@@ -1102,7 +1717,7 @@ async def update_team_manager_settings(request: TeamManagerSettings):
 
 
 @router.post("/team-manager/test")
-async def test_team_manager_connection(request: TeamManagerTestRequest):
+def test_team_manager_connection(request: TeamManagerTestRequest):
     """测试 Team Manager 连接"""
     from ...core.upload.team_manager_upload import test_team_manager_connection as do_test
 

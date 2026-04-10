@@ -1690,7 +1690,7 @@ def _get_account_overview_data(
 # ============== API Endpoints ==============
 
 @router.post("", response_model=AccountResponse)
-async def create_manual_account(request: ManualAccountCreateRequest):
+def create_manual_account(request: ManualAccountCreateRequest):
     """
     手动新增账号（邮箱 + 密码）。
     """
@@ -1745,7 +1745,7 @@ async def create_manual_account(request: ManualAccountCreateRequest):
 
 
 @router.post("/import")
-async def import_accounts(request: ImportAccountsRequest):
+def import_accounts(request: ImportAccountsRequest):
     """
     一键导入账号（账号总览卡片使用）。
     支持按账号详情字段导入；可选覆盖同邮箱已有账号。
@@ -1938,7 +1938,7 @@ async def import_accounts(request: ImportAccountsRequest):
 
 
 @router.get("", response_model=AccountListResponse)
-async def list_accounts(
+def list_accounts(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     status: Optional[str] = Query(None, description="状态筛选"),
@@ -1984,7 +1984,7 @@ async def list_accounts(
 
 
 @router.get("/overview/cards")
-async def list_accounts_overview_cards(
+def list_accounts_overview_cards(
     refresh: bool = Query(False, description="是否强制刷新远端配额"),
     search: Optional[str] = Query(None, description="按邮箱搜索"),
     status: Optional[str] = Query(None, description="状态筛选"),
@@ -2084,7 +2084,7 @@ async def list_accounts_overview_cards(
 
 
 @router.get("/overview/cards/addable")
-async def list_accounts_overview_addable(
+def list_accounts_overview_addable(
     search: Optional[str] = Query(None, description="按邮箱搜索"),
     status: Optional[str] = Query(None, description="状态筛选"),
     email_service: Optional[str] = Query(None, description="邮箱服务筛选"),
@@ -2126,7 +2126,7 @@ async def list_accounts_overview_addable(
 
 
 @router.get("/overview/cards/selectable")
-async def list_accounts_overview_selectable(
+def list_accounts_overview_selectable(
     search: Optional[str] = Query(None, description="按邮箱搜索"),
     status: Optional[str] = Query(None, description="状态筛选"),
     email_service: Optional[str] = Query(None, description="邮箱服务筛选"),
@@ -2173,7 +2173,7 @@ async def list_accounts_overview_selectable(
 
 
 @router.post("/overview/cards/remove")
-async def remove_accounts_overview_cards(request: OverviewCardDeleteRequest):
+def remove_accounts_overview_cards(request: OverviewCardDeleteRequest):
     """从账号总览卡片移除（软删除，不影响账号管理列表）。"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -2205,7 +2205,7 @@ async def remove_accounts_overview_cards(request: OverviewCardDeleteRequest):
 
 
 @router.post("/overview/cards/{account_id}/restore")
-async def restore_accounts_overview_card(account_id: int):
+def restore_accounts_overview_card(account_id: int):
     """恢复单个已删除的总览卡片。"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -2220,7 +2220,7 @@ async def restore_accounts_overview_card(account_id: int):
 
 
 @router.post("/overview/cards/{account_id}/attach")
-async def attach_accounts_overview_card(account_id: int):
+def attach_accounts_overview_card(account_id: int):
     """从账号管理选择账号附加到总览卡片（已存在时保持幂等）。"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -2241,7 +2241,7 @@ async def attach_accounts_overview_card(account_id: int):
 
 
 @router.post("/overview/refresh")
-async def refresh_accounts_overview(request: OverviewRefreshRequest):
+def refresh_accounts_overview(request: OverviewRefreshRequest):
     """
     批量刷新账号总览数据。
     """
@@ -2366,7 +2366,7 @@ def create_overview_refresh_async_task(request: OverviewRefreshRequest):
 
 
 @router.get("/current")
-async def get_current_account():
+def get_current_account():
     """获取当前已切换的账号"""
     with get_db() as db:
         current_id = _get_current_account_id(db)
@@ -2388,7 +2388,7 @@ async def get_current_account():
 
 
 @router.post("/{account_id}/switch")
-async def switch_current_account(account_id: int):
+def switch_current_account(account_id: int):
     """
     一键切换当前账号。
     """
@@ -2409,7 +2409,7 @@ async def switch_current_account(account_id: int):
 
 
 @router.get("/{account_id}", response_model=AccountResponse)
-async def get_account(account_id: int):
+def get_account(account_id: int):
     """获取单个账号详情"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -2419,7 +2419,7 @@ async def get_account(account_id: int):
 
 
 @router.get("/{account_id}/tokens")
-async def get_account_tokens(account_id: int):
+def get_account_tokens(account_id: int):
     """获取账号的 Token 信息"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -2450,7 +2450,7 @@ async def get_account_tokens(account_id: int):
 
 
 @router.patch("/{account_id}", response_model=AccountResponse)
-async def update_account(account_id: int, request: AccountUpdateRequest):
+def update_account(account_id: int, request: AccountUpdateRequest):
     """更新账号状态"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -2482,7 +2482,7 @@ async def update_account(account_id: int, request: AccountUpdateRequest):
 
 
 @router.get("/{account_id}/cookies")
-async def get_account_cookies(account_id: int):
+def get_account_cookies(account_id: int):
     """获取账号的 cookie 字符串（仅供支付使用）"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -2492,7 +2492,7 @@ async def get_account_cookies(account_id: int):
 
 
 @router.delete("/{account_id}")
-async def delete_account(account_id: int):
+def delete_account(account_id: int):
     """删除单个账号"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -2504,7 +2504,7 @@ async def delete_account(account_id: int):
 
 
 @router.post("/batch-delete")
-async def batch_delete_accounts(request: BatchDeleteRequest):
+def batch_delete_accounts(request: BatchDeleteRequest):
     """批量删除账号"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -2531,7 +2531,7 @@ async def batch_delete_accounts(request: BatchDeleteRequest):
 
 
 @router.post("/batch-update")
-async def batch_update_accounts(request: BatchUpdateRequest):
+def batch_update_accounts(request: BatchUpdateRequest):
     """批量更新账号状态"""
     if request.status not in [e.value for e in AccountStatus]:
         raise HTTPException(status_code=400, detail="无效的状态值")
@@ -2576,7 +2576,7 @@ class BatchCodexAuthRequest(BaseModel):
 
 
 @router.post("/export/json")
-async def export_accounts_json(request: BatchExportRequest):
+def export_accounts_json(request: BatchExportRequest):
     """导出账号为 JSON 格式"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -2619,7 +2619,7 @@ async def export_accounts_json(request: BatchExportRequest):
 
 
 @router.post("/export/csv")
-async def export_accounts_csv(request: BatchExportRequest):
+def export_accounts_csv(request: BatchExportRequest):
     """导出账号为 CSV 格式"""
     import csv
     import io
@@ -2675,7 +2675,7 @@ async def export_accounts_csv(request: BatchExportRequest):
 
 
 @router.post("/export/sub2api")
-async def export_accounts_sub2api(request: BatchExportRequest):
+def export_accounts_sub2api(request: BatchExportRequest):
     """导出账号为 Sub2Api 格式（所有选中账号合并到一个 JSON 的 accounts 数组中）"""
 
     def make_account_entry(acc) -> dict:
@@ -2739,7 +2739,7 @@ async def export_accounts_sub2api(request: BatchExportRequest):
 
 
 @router.post("/export/codex")
-async def export_accounts_codex(request: BatchExportRequest):
+def export_accounts_codex(request: BatchExportRequest):
     """????? Codex ???????"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -2775,7 +2775,7 @@ async def export_accounts_codex(request: BatchExportRequest):
 
 
 @router.post("/export/cpa")
-async def export_accounts_cpa(request: BatchExportRequest):
+def export_accounts_cpa(request: BatchExportRequest):
     """导出账号为 CPA Token JSON 格式（每个账号单独一个 JSON 文件，打包为 ZIP）"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -2816,7 +2816,7 @@ async def export_accounts_cpa(request: BatchExportRequest):
 
 
 @router.get("/stats/summary")
-async def get_accounts_stats():
+def get_accounts_stats():
     """获取账号统计信息"""
     with get_db() as db:
         from sqlalchemy import func
@@ -2844,7 +2844,7 @@ async def get_accounts_stats():
 
 
 @router.get("/stats/overview")
-async def get_accounts_overview():
+def get_accounts_overview():
     """获取账号总览统计信息（用于总览页面）"""
     with get_db() as db:
         total = db.query(func.count(Account.id)).scalar() or 0
@@ -2952,7 +2952,7 @@ class BatchValidateRequest(BaseModel):
 
 
 @router.post("/batch-refresh")
-async def batch_refresh_tokens(request: BatchRefreshRequest, background_tasks: BackgroundTasks):
+def batch_refresh_tokens(request: BatchRefreshRequest, background_tasks: BackgroundTasks):
     """批量刷新账号 Token"""
     proxy = _get_proxy(request.proxy)
 
@@ -3006,7 +3006,7 @@ def create_batch_refresh_async_task(request: BatchRefreshRequest):
 
 
 @router.post("/{account_id}/refresh")
-async def refresh_account_token(account_id: int, request: Optional[TokenRefreshRequest] = Body(default=None)):
+def refresh_account_token(account_id: int, request: Optional[TokenRefreshRequest] = Body(default=None)):
     """刷新单个账号的 Token"""
     proxy = _get_proxy(request.proxy if request else None)
     result = do_refresh(account_id, proxy)
@@ -3072,7 +3072,7 @@ def _run_batch_validate_tokens(request: BatchValidateRequest) -> Dict[str, Any]:
 
 
 @router.post("/batch-validate")
-async def batch_validate_tokens(request: BatchValidateRequest):
+def batch_validate_tokens(request: BatchValidateRequest):
     """批量验证账号 Token 有效性"""
     return _run_batch_validate_tokens(request)
 
@@ -3164,7 +3164,7 @@ def run_quick_refresh_workflow(source: str = "manual") -> Dict[str, Any]:
 
 
 @router.post("/{account_id}/validate")
-async def validate_account_token(account_id: int, request: Optional[TokenValidateRequest] = Body(default=None)):
+def validate_account_token(account_id: int, request: Optional[TokenValidateRequest] = Body(default=None)):
     """验证单个账号的 Token 有效性"""
     proxy = _get_proxy(request.proxy if request else None)
     is_valid, error = do_validate(account_id, proxy)
@@ -3265,7 +3265,7 @@ def get_codex_auth_async_task(task_id: str):
 
 
 @router.post("/codex-auth/export")
-async def export_codex_auth_artifacts(request: BatchCodexAuthRequest):
+def export_codex_auth_artifacts(request: BatchCodexAuthRequest):
     with get_db() as db:
         accounts = _resolve_codex_auth_accounts(
             db,
@@ -3318,7 +3318,7 @@ class BatchCPAUploadRequest(BaseModel):
 
 
 @router.post("/batch-upload-cpa")
-async def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
+def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
     """批量上传账号到 CPA"""
 
     proxy = request.proxy if request.proxy else get_settings().proxy_url
@@ -3345,7 +3345,7 @@ async def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
 
 
 @router.post("/{account_id}/upload-cpa")
-async def upload_account_to_cpa(account_id: int, request: Optional[CPAUploadRequest] = Body(default=None)):
+def upload_account_to_cpa(account_id: int, request: Optional[CPAUploadRequest] = Body(default=None)):
     """上传单个账号到 CPA"""
 
     proxy = request.proxy if request and request.proxy else get_settings().proxy_url
@@ -3408,7 +3408,7 @@ class BatchSub2ApiUploadRequest(BaseModel):
 
 
 @router.post("/batch-upload-sub2api")
-async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
+def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
     """批量上传账号到 Sub2API"""
 
     # 解析指定的 Sub2API 服务
@@ -3446,7 +3446,7 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
 
 
 @router.post("/{account_id}/upload-sub2api")
-async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUploadRequest] = Body(default=None)):
+def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUploadRequest] = Body(default=None)):
     """上传单个账号到 Sub2API"""
 
     service_id = request.service_id if request else None
@@ -3506,7 +3506,7 @@ class BatchNewApiUploadRequest(BaseModel):
 
 
 @router.post("/batch-upload-new-api")
-async def batch_upload_accounts_to_new_api(request: BatchNewApiUploadRequest):
+def batch_upload_accounts_to_new_api(request: BatchNewApiUploadRequest):
     """批量上传账号到 new-api。"""
     with get_db() as db:
         if request.service_id:
@@ -3532,7 +3532,7 @@ async def batch_upload_accounts_to_new_api(request: BatchNewApiUploadRequest):
 
 
 @router.post("/{account_id}/upload-new-api")
-async def upload_account_to_new_api(account_id: int, request: Optional[NewApiUploadRequest] = Body(default=None)):
+def upload_account_to_new_api(account_id: int, request: Optional[NewApiUploadRequest] = Body(default=None)):
     """上传单个账号到 new-api。"""
     service_id = request.service_id if request else None
 
@@ -3577,7 +3577,7 @@ class BatchUploadTMRequest(BaseModel):
 
 
 @router.post("/batch-upload-tm")
-async def batch_upload_accounts_to_tm(request: BatchUploadTMRequest):
+def batch_upload_accounts_to_tm(request: BatchUploadTMRequest):
     """批量上传账号到 Team Manager"""
 
     with get_db() as db:
@@ -3603,7 +3603,7 @@ async def batch_upload_accounts_to_tm(request: BatchUploadTMRequest):
 
 
 @router.post("/{account_id}/upload-tm")
-async def upload_account_to_tm(account_id: int, request: Optional[UploadTMRequest] = Body(default=None)):
+def upload_account_to_tm(account_id: int, request: Optional[UploadTMRequest] = Body(default=None)):
     """上传单账号到 Team Manager"""
 
     service_id = request.service_id if request else None
@@ -3709,7 +3709,7 @@ def _build_inbox_config(db, service_type, email: str) -> dict:
 
 
 @router.post("/{account_id}/inbox-code")
-async def get_account_inbox_code(account_id: int):
+def get_account_inbox_code(account_id: int):
     """查询账号邮箱收件箱最新验证码"""
     from ...services import EmailServiceFactory, EmailServiceType
 

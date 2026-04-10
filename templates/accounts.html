@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>账号管理 - OpenAI 注册系统</title>
     <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230f5ae0'/><path d='M18 14h28v36H18z' fill='white'/><path d='M24 22h16M24 30h16M24 38h10' stroke='%230f5ae0' stroke-width='4' stroke-linecap='round'/></svg>">
     <style>
         :root {
             --account-green: #22c55e;
@@ -38,12 +38,16 @@
             font-size: 0.75rem;
         }
         .password-hidden {
-            filter: blur(4px);
+            -webkit-text-security: disc;
+            color: transparent;
+            text-shadow: 0 0 8px rgba(82, 98, 122, 0.55);
             cursor: pointer;
-            transition: filter 0.2s;
+            transition: color 0.15s, text-shadow 0.15s;
         }
         .password-hidden:hover {
-            filter: blur(0);
+            color: inherit;
+            text-shadow: none;
+            -webkit-text-security: none;
         }
         .token-status {
             display: flex;
@@ -429,8 +433,8 @@
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">⚙️</a>
-            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">🌙</button>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
         </div>
         </nav>
 
@@ -495,13 +499,13 @@
                             <option value="none">普通</option>
                         </select>
 
-                        <input type="text" id="search-input" class="form-input" placeholder="🔍 搜索邮箱..." style="min-width: 200px;">
+                        <input type="text" id="search-input" class="form-input" placeholder="搜索邮箱..." style="min-width: 200px;">
                     </div>
 
                     <div class="toolbar-right">
                         <div class="hover-help">
                             <button class="btn btn-warning" id="batch-refresh-btn" disabled aria-describedby="batch-refresh-help">
-                                🔄 刷新Token
+                                刷新 Token
                             </button>
                             <div class="hover-help-bubble" id="batch-refresh-help" role="tooltip">
                                 <strong>刷新Token</strong>
@@ -511,7 +515,7 @@
                         </div>
                         <div class="hover-help">
                             <button class="btn btn-info" id="batch-validate-btn" disabled aria-describedby="batch-validate-help">
-                                ✅ 验证Token
+                                验证 Token
                             </button>
                             <div class="hover-help-bubble" id="batch-validate-help" role="tooltip">
                                 <strong>验证Token</strong>
@@ -521,7 +525,7 @@
                         </div>
                         <div class="hover-help">
                             <button class="btn btn-info" id="batch-check-sub-btn" disabled aria-describedby="batch-check-sub-help">
-                                🔍 检测订阅
+                                检测订阅
                             </button>
                             <div class="hover-help-bubble" id="batch-check-sub-help" role="tooltip">
                                 <strong>检测订阅</strong>
@@ -537,21 +541,21 @@
                         </button>
                         <div class="dropdown">
                             <button class="btn btn-success" id="batch-upload-btn" disabled>
-                                ☁️ 上传
+                                上传
                             </button>
                             <div class="dropdown-menu" id="upload-menu">
-                                <a href="#" class="dropdown-item" id="batch-upload-cpa-item">☁️ 上传到 CPA</a>
-                                <a href="#" class="dropdown-item" id="batch-upload-sub2api-item">🔗 上传到 Sub2API</a>
-                                <a href="#" class="dropdown-item" id="batch-upload-tm-item">🚀 上传到 Team Manager</a>
+                                <a href="#" class="dropdown-item" id="batch-upload-cpa-item">上传到 CPA</a>
+                                <a href="#" class="dropdown-item" id="batch-upload-sub2api-item">上传到 Sub2API</a>
+                                <a href="#" class="dropdown-item" id="batch-upload-tm-item">上传到 Team Manager</a>
                                 <a href="#" class="dropdown-item" id="batch-upload-new-api-item">🆕 上传到 new-api</a>
                             </div>
                         </div>
                         <button class="btn btn-danger" id="batch-delete-btn" disabled>
-                            🗑️ 批量删除
+                            批量删除
                         </button>
                         <div class="dropdown">
                             <button class="btn btn-primary" id="export-btn">
-                                📥 导出
+                                导出
                             </button>
                             <div class="dropdown-menu" id="export-menu">
                                 <a href="#" class="dropdown-item" data-format="json">导出 JSON</a>
@@ -567,7 +571,7 @@
                             </button>
                         </div>
                         <button class="btn btn-secondary" id="auto-quick-refresh-settings-btn" title="定时自动一键刷新设置">
-                            ⚙️ 定时
+                            定时
                         </button>
                     </div>
                 </div>
@@ -717,7 +721,7 @@
     <div class="modal" id="detail-modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>📋 账号详情</h3>
+                <h3>账号详情</h3>
                 <button class="modal-close" id="close-modal">&times;</button>
             </div>
             <div class="modal-body" id="modal-body">
@@ -730,7 +734,7 @@
     <div class="modal" id="cpa-service-modal">
         <div class="modal-content" style="max-width: 480px;">
             <div class="modal-header">
-                <h3>☁️ 选择 CPA 服务</h3>
+                <h3>选择 CPA 服务</h3>
                 <button class="modal-close" id="close-cpa-modal">&times;</button>
             </div>
             <div class="modal-body">
@@ -750,7 +754,7 @@
     <div class="modal" id="tm-service-modal">
         <div class="modal-content" style="max-width: 480px;">
             <div class="modal-header">
-                <h3>🚀 选择 Team Manager 服务</h3>
+                <h3>选择 Team Manager 服务</h3>
                 <button class="modal-close" id="close-tm-modal">&times;</button>
             </div>
             <div class="modal-body">
@@ -770,7 +774,7 @@
     <div class="modal" id="sub2api-service-modal">
         <div class="modal-content" style="max-width: 480px;">
             <div class="modal-header">
-                <h3>🔗 选择 Sub2API 服务</h3>
+                <h3>选择 Sub2API 服务</h3>
                 <button class="modal-close" id="close-sub2api-modal">&times;</button>
             </div>
             <div class="modal-body">
@@ -790,7 +794,7 @@
     <div class="modal" id="auto-quick-refresh-modal">
         <div class="modal-content" style="max-width: 560px;">
             <div class="modal-header">
-                <h3>⚙️ 定时自动一键刷新</h3>
+                <h3>定时自动一键刷新</h3>
                 <button class="modal-close" id="close-auto-quick-refresh-modal">&times;</button>
             </div>
             <div class="modal-body">
