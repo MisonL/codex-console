@@ -17,10 +17,17 @@ from datetime import datetime
 
 from curl_cffi import requests as cffi_requests
 
+from .anyauto.access_token_only_registration_engine import AccessTokenOnlyRegistrationEngine
 from .anyauto.register_flow import AnyAutoRegistrationEngine
+from .anyauto.registration_mode import (
+    CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
+    CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
+    resolve_chatgpt_registration_mode,
+)
 from .openai.oauth import OAuthManager, OAuthStart
 from .openai.sentinel_browser import BrowserSentinelError, fetch_browser_sentinel_artifacts
 from .http_client import OpenAIHTTPClient, HTTPClientError
+from .proxy_utils import normalize_proxy_url
 from ..services import EmailServiceFactory, BaseEmailService, EmailServiceType
 from ..database import crud
 from ..database.session import get_db
@@ -100,7 +107,8 @@ class RegistrationEngine:
         email_service: BaseEmailService,
         proxy_url: Optional[str] = None,
         callback_logger: Optional[Callable[[str], None]] = None,
-        task_uuid: Optional[str] = None
+        task_uuid: Optional[str] = None,
+        refresh_token_enabled: bool = True,
     ):
         """
         初始化注册引擎
@@ -112,9 +120,13 @@ class RegistrationEngine:
             task_uuid: 任务 UUID（用于数据库记录）
         """
         self.email_service = email_service
-        self.proxy_url = proxy_url
+        self.proxy_url = normalize_proxy_url(proxy_url)
         self.callback_logger = callback_logger or (lambda msg: logger.info(msg))
         self.task_uuid = task_uuid
+        self.refresh_token_enabled = bool(refresh_token_enabled)
+        self.chatgpt_registration_mode = resolve_chatgpt_registration_mode(
+            refresh_token_enabled=self.refresh_token_enabled,
+        )
 
         # 创建 HTTP 客户端
         self.http_client = OpenAIHTTPClient(proxy_url=proxy_url)
@@ -169,14 +181,6 @@ class RegistrationEngine:
         # 调用回调函数
         if self.callback_logger:
             self.callback_logger(log_message)
-
-        # 记录到数据库（如果有关联任务）
-        if self.task_uuid:
-            try:
-                with get_db() as db:
-                    crud.append_task_log(db, self.task_uuid, log_message)
-            except Exception as e:
-                logger.warning(f"记录任务日志失败: {e}")
 
         # 根据级别记录到日志系统
         if level == "error":
@@ -2899,6 +2903,14 @@ class RegistrationEngine:
             self._log("注册流程启动，开始替你敲门")
             self._log("=" * 60)
             self._log(f"注册入口链路配置: {self.registration_entry_flow}")
+            self._log(
+                "ChatGPT 注册模式: "
+                + (
+                    "有 RT / 新 PR 链路"
+                    if self.chatgpt_registration_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN
+                    else "无 RT / AccessTokenOnly 兼容链路"
+                )
+            )
             configured_entry_flow = self.registration_entry_flow
             service_type_raw = getattr(self.email_service, "service_type", "")
             service_type_value = str(getattr(service_type_raw, "value", service_type_raw) or "").strip().lower()
@@ -2910,7 +2922,9 @@ class RegistrationEngine:
             # 针对 native 和 abcard 模式，直接调用已经优化的 AnyAuto 引擎（PR60 架构）
             # 该引擎处理 OAuth 回调逻辑更稳健，能避免二次登录触发验证码。
             if effective_entry_flow in {"native", "abcard"}:
-                self._log(f"正在切换至优化版 AnyAuto 引擎执行 {effective_entry_flow} 链路...")
+                self._log(
+                    f"正在切换至 AnyAuto 引擎执行 {effective_entry_flow} 链路，模式={self.chatgpt_registration_mode} ..."
+                )
                 return self._run_anyauto_fallback()
 
             # 1. 检查 IP 地理位置
@@ -3022,6 +3036,8 @@ class RegistrationEngine:
                 "has_refresh_token": bool(result.refresh_token),
                 "registration_entry_flow": configured_entry_flow,
                 "registration_entry_flow_effective": effective_entry_flow,
+                "chatgpt_registration_mode": self.chatgpt_registration_mode,
+                "chatgpt_has_refresh_token_solution": self.chatgpt_registration_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
                 # 对齐 K:\1\2：原生入口允许无 session_token 成功，但会标记待补。
                 "session_token_pending": (effective_entry_flow == "native") and (not bool(result.session_token)),
             }
@@ -3037,9 +3053,17 @@ class RegistrationEngine:
         self,
         flow_result: Optional[Dict[str, Any]],
         primary_error: str = "",
+        mode: Optional[str] = None,
+        flow_label: Optional[str] = None,
     ) -> RegistrationResult:
         """Map PR60 AnyAuto V2 output into the current RegistrationResult structure."""
         result = RegistrationResult(success=False, logs=self.logs)
+        resolved_mode = mode or getattr(self, "chatgpt_registration_mode", CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN)
+        resolved_flow_label = flow_label or (
+            "any-auto-register-refresh-token"
+            if resolved_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN
+            else "any-auto-register-access-token-only"
+        )
         result.email = str(self.email or "")
         result.password = str(self.password or "")
         result.device_id = str(self.device_id or "")
@@ -3051,10 +3075,12 @@ class RegistrationEngine:
             else:
                 result.error_message = fallback_error or primary_error or "注册失败"
             result.metadata = {
-                "registration_flow": "any-auto-register-fallback",
-                "fallback_attempted": True,
+                "registration_flow": resolved_flow_label,
+                "fallback_attempted": False,
                 "primary_error": primary_error,
                 "fallback_success": False,
+                "chatgpt_registration_mode": resolved_mode,
+                "chatgpt_has_refresh_token_solution": resolved_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
             }
             return result
 
@@ -3089,35 +3115,46 @@ class RegistrationEngine:
                 "email_service": self.email_service.service_type.value,
                 "proxy_used": self.proxy_url,
                 "registered_at": datetime.now().isoformat(),
-                "registration_flow": "any-auto-register-fallback",
-                "fallback_attempted": True,
+                "registration_flow": resolved_flow_label,
+                "fallback_attempted": False,
                 "primary_error": primary_error,
                 "client_id": client_id,
                 "device_id": result.device_id,
                 "has_session_token": bool(result.session_token),
                 "has_access_token": bool(result.access_token),
                 "has_refresh_token": bool(result.refresh_token),
+                "chatgpt_registration_mode": resolved_mode,
+                "chatgpt_has_refresh_token_solution": resolved_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
             }
         )
         result.metadata = metadata
         return result
 
     def _run_anyauto_fallback(self, primary_error: str = "") -> RegistrationResult:
-        """Run the PR60 AnyAuto V2 engine as a controlled fallback."""
+        """Run the requested AnyAuto engine."""
         settings = get_settings()
         max_retries = int(getattr(settings, "registration_max_retries", 3) or 3)
         browser_mode = str(
             getattr(settings, "registration_anyauto_browser_mode", "protocol") or "protocol"
         ).strip()
-
-        flow_engine = AnyAutoRegistrationEngine(
+        requested_mode = getattr(self, "chatgpt_registration_mode", CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN)
+        flow_engine_cls = (
+            AccessTokenOnlyRegistrationEngine
+            if requested_mode == CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY
+            else AnyAutoRegistrationEngine
+        )
+        flow_engine = flow_engine_cls(
             email_service=self.email_service,
             proxy_url=self.proxy_url,
-
             callback_logger=self._log,
             max_retries=max_retries,
             browser_mode=browser_mode or "protocol",
-            extra_config=None,
+            extra_config={
+                "default_password_length": int(
+                    getattr(settings, "registration_default_password_length", DEFAULT_PASSWORD_LENGTH)
+                    or DEFAULT_PASSWORD_LENGTH
+                ),
+            },
         )
         flow_result = flow_engine.run()
 
@@ -3128,7 +3165,11 @@ class RegistrationEngine:
         self.session = flow_engine.session
         self.device_id = flow_engine.device_id
 
-        fallback_result = self._build_anyauto_fallback_result(flow_result, primary_error=primary_error)
+        fallback_result = self._build_anyauto_fallback_result(
+            flow_result,
+            primary_error=primary_error,
+            mode=requested_mode,
+        )
         if fallback_result.session_token:
             self.session_token = fallback_result.session_token
         return fallback_result
@@ -3218,6 +3259,15 @@ class RegistrationEngine:
         try:
             # 获取默认 client_id
             settings = get_settings()
+            cookie_text = self._dump_session_cookies()
+            if (not result.session_token) and cookie_text:
+                result.session_token = self._extract_session_token_from_cookie_text(cookie_text)
+            if not result.account_id and result.access_token:
+                result.account_id = self._extract_account_id_from_access_token(result.access_token)
+            if not result.workspace_id:
+                result.workspace_id = str(self._get_workspace_id() or result.account_id or "").strip()
+            if (not result.account_id) and result.workspace_id:
+                result.account_id = str(result.workspace_id or "").strip()
 
             with get_db() as db:
                 # 保存账户信息
@@ -3227,7 +3277,7 @@ class RegistrationEngine:
                     password=result.password,
                     client_id=settings.openai_client_id,
                     session_token=result.session_token,
-                    cookies=self._dump_session_cookies(),
+                    cookies=cookie_text,
                     email_service=self.email_service.service_type.value,
                     email_service_id=self.email_info.get("service_id") if self.email_info else None,
                     account_id=result.account_id,

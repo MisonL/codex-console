@@ -6,7 +6,7 @@ ChatGPT 注册客户端模块
 import random
 import uuid
 import time
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 try:
     from curl_cffi import requests as curl_requests
@@ -16,6 +16,7 @@ except ImportError:
     sys.exit(1)
 
 from ..openai.sentinel_browser import fetch_browser_sentinel_artifacts
+from ..openai.sentinel_token_v2 import build_sentinel_token
 from .utils import (
     FlowState,
     build_browser_headers,
@@ -91,7 +92,12 @@ class ChatGPTClient:
         self.browser_mode = browser_mode or "protocol"
         self.device_id = str(uuid.uuid4())
         self.refresh_token = ""  # 初始化为空字符串
-        self.last_code_verifier = None # 保存 PKCE 验证码
+        self.last_code_verifier = None  # 保存 PKCE 验证码
+        self.last_oauth_client_id = None
+        self.last_oauth_redirect_uri = None
+        self.last_oauth_state = None
+        self.last_follow_callback_url = ""
+        self.last_follow_final_url = ""
         self.accept_language = random.choice([
 
             "en-US,en;q=0.9",
@@ -125,8 +131,172 @@ class ChatGPTClient:
         # 设置 oai-did cookie
         seed_oai_device_cookie(self.session, self.device_id)
         self.last_registration_state = FlowState()
+
+    @staticmethod
+    def _is_oauth_callback_url(url):
+        text = str(url or "").strip().lower()
+        if not text:
+            return False
+        return ("/api/auth/callback/openai" in text) or ("code=" in text)
+
+    @classmethod
+    def _pick_best_callback_url(cls, *candidates):
+        cleaned = []
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text and text not in cleaned:
+                cleaned.append(text)
+
+        for text in cleaned:
+            lowered = text.lower()
+            if ("/api/auth/callback/openai" in lowered) and ("code=" in lowered):
+                return text
+        for text in cleaned:
+            if cls._is_oauth_callback_url(text):
+                return text
+        return ""
+
+    def _sync_nextauth_pkce_cookie(self, code_verifier):
+        value = str(code_verifier or "").strip()
+        if not value:
+            return
+        cookie_names = (
+            "__Secure-next-auth.pkce.code_verifier",
+            "next-auth.pkce.code_verifier",
+        )
+        domains = (".chatgpt.com", "chatgpt.com")
+        for name in cookie_names:
+            for domain in domains:
+                try:
+                    self.session.cookies.set(name, value, domain=domain, path="/")
+                except Exception:
+                    continue
+
+    def _ensure_nextauth_callback_cookie(self, callback_url=None):
+        value = str(callback_url or f"{self.BASE}/").strip()
+        if not value:
+            return
+        for name in ("__Secure-next-auth.callback-url", "next-auth.callback-url"):
+            for domain in (".chatgpt.com", "chatgpt.com"):
+                try:
+                    self.session.cookies.set(name, value, domain=domain, path="/")
+                except Exception:
+                    continue
+
+    def _sync_response_cookies(self, response):
+        important_prefixes = (
+            "__Secure-next-auth.",
+            "_Secure-next-auth.",
+            "next-auth.",
+            "__Host-next-auth.",
+        )
+        cookie_headers = []
+        try:
+            if hasattr(response.headers, "get_list"):
+                cookie_headers.extend(response.headers.get_list("Set-Cookie") or [])
+        except Exception:
+            pass
+        try:
+            merged = response.headers.get("Set-Cookie", "")
+        except Exception:
+            merged = ""
+        if merged:
+            cookie_headers.append(merged)
+
+        for cookie_header in cookie_headers:
+            header_text = str(cookie_header or "").strip()
+            if not header_text:
+                continue
+            first_part = header_text.split(";", 1)[0]
+            if "=" not in first_part:
+                continue
+            name, value = first_part.split("=", 1)
+            cookie_name = str(name or "").strip()
+            cookie_value = unquote(str(value or "").strip())
+            if not cookie_name:
+                continue
+            if cookie_name == "oai-did" and cookie_value:
+                seed_oai_device_cookie(self.session, cookie_value)
+                continue
+            if not cookie_name.startswith(important_prefixes):
+                continue
+            for domain in (".chatgpt.com", "chatgpt.com"):
+                try:
+                    self.session.cookies.set(cookie_name, cookie_value, domain=domain, path="/")
+                except Exception:
+                    continue
+
+    def export_auth_context(self):
+        return {
+            "session": self.session,
+            "device_id": self.device_id,
+            "user_agent": self.ua,
+            "sec_ch_ua": self.sec_ch_ua,
+            "impersonate": self.impersonate,
+            "accept_language": getattr(self, "accept_language", ""),
+            "chrome_full": getattr(self, "chrome_full", ""),
+            "last_code_verifier": getattr(self, "last_code_verifier", ""),
+            "last_oauth_client_id": getattr(self, "last_oauth_client_id", ""),
+            "last_oauth_redirect_uri": getattr(self, "last_oauth_redirect_uri", ""),
+            "last_oauth_state": getattr(self, "last_oauth_state", ""),
+            "last_registration_state": getattr(self, "last_registration_state", FlowState()),
+            "browser_mode": getattr(self, "browser_mode", "protocol"),
+        }
+
+    def _extract_callback_from_response_history(self, response, fallback_url=""):
+        candidates = []
+        history = list(getattr(response, "history", []) or [])
+
+        for item in history:
+            try:
+                item_url = str(getattr(item, "url", "") or "").strip()
+            except Exception:
+                item_url = ""
+            if item_url:
+                candidates.append(item_url)
+            try:
+                location = normalize_flow_url(
+                    (getattr(item, "headers", {}) or {}).get("Location", ""),
+                    auth_base=self.AUTH,
+                )
+            except Exception:
+                location = ""
+            if location:
+                candidates.append(location)
+
+        final_url = str(getattr(response, "url", "") or fallback_url or "").strip()
+        if final_url:
+            candidates.append(final_url)
+
+        callback_url = self._pick_best_callback_url(*candidates)
+        return callback_url, final_url
+
+    def _build_oauth_token_result(self, tokens, session_token=""):
+        payload = decode_jwt_payload(str((tokens or {}).get("access_token") or "").strip())
+        auth_payload = payload.get("https://api.openai.com/auth") or {}
+        account_id = (
+            str(auth_payload.get("chatgpt_account_id") or "").strip()
+            or str(auth_payload.get("account_id") or "").strip()
+        )
+        user_id = (
+            str(auth_payload.get("chatgpt_user_id") or "").strip()
+            or str(auth_payload.get("user_id") or "").strip()
+        )
+        return {
+            "access_token": str((tokens or {}).get("access_token") or "").strip(),
+            "refresh_token": str((tokens or {}).get("refresh_token") or "").strip(),
+            "session_token": str(session_token or "").strip(),
+            "account_id": account_id,
+            "user_id": user_id,
+            "workspace_id": account_id,
+            "expires": "",
+            "user": {},
+            "account": {},
+            "auth_provider": "oauth_token_exchange",
+            "raw_session": {},
+        }
     
-    def _log(self, msg):
+    def _log(self, msg, level="info"):
         """输出日志"""
         if self.verbose:
             print(f"  {msg}")
@@ -361,56 +531,118 @@ class ChatGPTClient:
             return True
         return False
 
-    def _follow_flow_state(self, state: FlowState, referer=None):
+    def _follow_flow_state(self, state: FlowState, referer=None, stop_before_callback=False, max_hops=16):
         """跟随服务端返回的 continue_url，推进注册状态机。"""
         target_url = state.continue_url or state.current_url
         if not target_url:
             return False, "缺少可跟随的 continue_url"
 
-        try:
-            self._browser_pause()
-            r = self.session.get(
-                target_url,
-                headers=self._headers(
-                    target_url,
-                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    referer=referer,
-                    navigation=True,
-                ),
-                allow_redirects=False, # 禁用自动跟随，手动追踪每一跳
-                timeout=30,
-            )
-            
-            # 手动追踪重定向链，确保每一跳都能嗅探到 RT
-            max_hops = 10
-            for _ in range(max_hops):
-                self._sniff_refresh_token(r)
-                if r.status_code not in (301, 302, 303, 307, 308):
-                    break
-                
-                location = r.headers.get("Location")
-                if not location:
-                    break
-                
-                # 处理相对路径
-                from urllib.parse import urljoin
-                target_url = urljoin(str(r.url), location)
-                self._log(f"重定向跳转 -> {target_url}")
-                
+        self.last_follow_callback_url = ""
+        self.last_follow_final_url = str(target_url or "").strip()
+
+        if not stop_before_callback:
+            try:
+                self._browser_pause()
                 r = self.session.get(
                     target_url,
                     headers=self._headers(
                         target_url,
                         accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        referer=str(r.url),
+                        referer=referer,
+                        navigation=True,
+                    ),
+                    allow_redirects=True,
+                    timeout=30,
+                )
+
+                self._sniff_refresh_token(r)
+                self._sync_response_cookies(r)
+
+                callback_url, final_url = self._extract_callback_from_response_history(
+                    r,
+                    fallback_url=target_url,
+                )
+                self.last_follow_callback_url = callback_url
+                self.last_follow_final_url = final_url
+                self._log(f"follow -> {r.status_code} {final_url}")
+                if callback_url:
+                    self._log(f"follow callback -> {callback_url[:160]}")
+
+                content_type = (r.headers.get("content-type", "") or "").lower()
+                if "application/json" in content_type:
+                    try:
+                        next_state = self._state_from_payload(r.json(), current_url=final_url)
+                    except Exception:
+                        next_state = self._state_from_url(final_url)
+                else:
+                    next_state = self._state_from_url(final_url)
+
+                self._log(f"follow state -> {describe_flow_state(next_state)}")
+                return True, next_state
+            except Exception as e:
+                self._log(f"跟随 continue_url 失败: {e}")
+                return False, str(e)
+
+        current_url = str(target_url or "").strip()
+        referer_url = referer
+
+        for hop in range(max_hops):
+            if self._is_oauth_callback_url(current_url):
+                self.last_follow_callback_url = current_url
+                self.last_follow_final_url = current_url
+                next_state = self._state_from_url(current_url)
+                self._log(f"follow stop before callback -> {current_url}")
+                self._log(f"follow state -> {describe_flow_state(next_state)}")
+                return True, next_state
+
+            try:
+                self._browser_pause()
+                r = self.session.get(
+                    current_url,
+                    headers=self._headers(
+                        current_url,
+                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        referer=referer_url,
                         navigation=True,
                     ),
                     allow_redirects=False,
                     timeout=30,
                 )
+            except Exception as e:
+                self._log(f"跟随 continue_url 失败: {e}")
+                return False, str(e)
 
-            final_url = str(r.url)
-            self._log(f"follow -> {r.status_code} {final_url}")
+            self._sniff_refresh_token(r)
+            self._sync_response_cookies(r)
+
+            final_url = str(r.url or current_url)
+            self.last_follow_final_url = final_url
+            self._log(f"follow[{hop + 1}] -> {r.status_code} {final_url}")
+
+            if r.status_code in (301, 302, 303, 307, 308):
+                location = normalize_flow_url(
+                    (r.headers or {}).get("Location", ""),
+                    auth_base=self.AUTH,
+                )
+                if not location:
+                    next_state = self._state_from_url(final_url)
+                    self._log(f"follow state -> {describe_flow_state(next_state)}")
+                    return True, next_state
+
+                if self._is_oauth_callback_url(location):
+                    self.last_follow_callback_url = location
+                    next_state = self._state_from_url(location)
+                    self._log(f"follow callback -> {location[:160]}")
+                    self._log(f"follow state -> {describe_flow_state(next_state)}")
+                    return True, next_state
+
+                referer_url = final_url
+                current_url = location
+                continue
+
+            callback_url = self._pick_best_callback_url(final_url)
+            if callback_url:
+                self.last_follow_callback_url = callback_url
 
             content_type = (r.headers.get("content-type", "") or "").lower()
             if "application/json" in content_type:
@@ -423,9 +655,67 @@ class ChatGPTClient:
 
             self._log(f"follow state -> {describe_flow_state(next_state)}")
             return True, next_state
+
+        return False, f"continue_url 重定向超过最大跳数: {max_hops}"
+
+    def _manual_exchange_callback_tokens(self, callback_url):
+        target_url = self._pick_best_callback_url(callback_url)
+        if not target_url or "code=" not in target_url:
+            return None
+
+        import urllib.parse
+        from .oauth_client import OAuthClient
+
+        parsed = urllib.parse.urlparse(target_url)
+        code = urllib.parse.parse_qs(parsed.query).get("code", [None])[0]
+        if not code:
+            return None
+        if not self.last_code_verifier:
+            self._log("提取到 callback code，但缺少 PKCE verifier")
+            return None
+
+        client_id = (
+            getattr(self, "last_oauth_client_id", None)
+            or getattr(self, "client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
+        )
+        redirect_uri = (
+            getattr(self, "last_oauth_redirect_uri", None)
+            or getattr(self, "redirect_uri", f"{self.BASE}/api/auth/callback/openai")
+        )
+
+        self._log(
+            f"手动 OAuth 换码: client_id={client_id}, redirect_uri={redirect_uri}"
+        )
+
+        oauth = OAuthClient(
+            config={
+                "oauth_issuer": "https://auth.openai.com",
+                "oauth_client_id": client_id,
+                "oauth_redirect_uri": redirect_uri,
+            },
+            proxy=self.proxy,
+            verbose=self.verbose,
+            browser_mode=getattr(self, "browser_mode", "protocol"),
+        )
+        oauth.apply_auth_context(self.export_auth_context())
+
+        try:
+            tokens = oauth._exchange_code_for_tokens(
+                code,
+                code_verifier=self.last_code_verifier,
+                user_agent=self.ua,
+                impersonate=self.impersonate,
+            )
         except Exception as e:
-            self._log(f"跟随 continue_url 失败: {e}")
-            return False, str(e)
+            self._log(f"手动 OAuth 交换失败: {e}")
+            return None
+
+        if tokens and tokens.get("refresh_token"):
+            self.refresh_token = str(tokens["refresh_token"]).strip()
+            self._log("手动 OAuth 交换成功获取 refresh_token")
+        elif tokens:
+            self._log(f"手动 OAuth 交换已返回响应，但未包含 RT: {tokens}")
+        return tokens
 
     def _get_cookie_value(self, name, domain_hint=None):
         """读取当前会话中的 Cookie。"""
@@ -483,6 +773,7 @@ class ChatGPTClient:
             timeout=30,
         )
         self._sniff_refresh_token(response)
+        self._sync_response_cookies(response)
         
         if response.status_code != 200:
             return False, f"/api/auth/session -> HTTP {response.status_code}"
@@ -620,78 +911,49 @@ class ChatGPTClient:
         """
         state = self.last_registration_state or FlowState()
         self._log("步骤 1/4: 跟随注册回调 external_url ...")
-        
-        # 记录回调 URL 以便后续手动交换（如果自动跟随没抓到 RT）
-        callback_url = state.continue_url or state.current_url
+        callback_url = self._pick_best_callback_url(
+            self.last_follow_callback_url,
+            state.continue_url,
+            state.current_url,
+        )
+        manual_tokens = None
         
         if state.page_type == "external_url" or self._state_requires_navigation(state):
             ok, followed = self._follow_flow_state(
                 state,
                 referer=state.current_url or f"{self.AUTH}/about-you",
+                stop_before_callback=True,
             )
             if not ok:
                 return False, f"注册回调落地失败: {followed}"
             self.last_registration_state = followed
+            callback_url = self._pick_best_callback_url(
+                self.last_follow_callback_url,
+                followed.continue_url,
+                followed.current_url,
+                callback_url,
+            )
         else:
             self._log("注册回调已落地，跳过额外跟随")
 
-        # 检查是否已经抓到 RT
         if not self.refresh_token and callback_url and "code=" in callback_url:
-            self._log("⚠️ 自动跟随未捕获到 RT，尝试手动提取 code 进行 OAuth 交换...")
-            try:
-                from .oauth_client import OAuthClient
-                # 使用相同的 session 和指纹
-                oauth = OAuthClient(config={}, proxy=self.proxy, verbose=self.verbose)
-                oauth.session = self.session 
-                
-                # 尝试从 URL 提取 code
-                import urllib.parse
-                parsed = urllib.parse.urlparse(callback_url)
-                code = urllib.parse.parse_qs(parsed.query).get("code", [None])[0]
-                
-                if code and self.last_code_verifier:
-                    self._log(f"🔥 手动提取到 Code: {code[:15]}... 正在利用 PKCE Verifier 强制换码")
-                    
-                    # 准备正确的 OAuth 配置 (使用拦截到的原始值，这至关重要)
-                    client_id = getattr(self, "last_oauth_client_id", None) or getattr(self, "client_id", "app_EMoamEEZ73f0CkXaXp7hrann")
-                    redirect_uri = getattr(self, "last_oauth_redirect_uri", None) or getattr(self, "redirect_uri", f"{self.BASE}/api/auth/callback/openai")
-                    
-                    self._log(f"🔥 OAuth 换码参数: client_id={client_id}, redirect_uri={redirect_uri}")
-                    
-                    config = {
-                        "oauth_issuer": "https://auth.openai.com",
-                        "oauth_client_id": client_id,
-                        "oauth_redirect_uri": redirect_uri,
-                    }
-                    from .oauth_client import OAuthClient
-                    oauth = OAuthClient(config=config, proxy=self.proxy, verbose=True)
-                    oauth.session = self.session # 复用同一个 Session 以维持指纹一致性
-                    
-                    # 使用注册阶段生成的 code_verifier 进行交换
-                    # 我们需要捕获这里的原始响应以进行诊断
-                    try:
-                        res = oauth._exchange_code_for_tokens(code, code_verifier=self.last_code_verifier, user_agent=self.ua, impersonate=self.impersonate)
-                        if res and res.get("refresh_token"):
-                            self.refresh_token = res["refresh_token"]
-                            self._log(f"🔥 [SUCCESS] 手动 OAuth 交换成功获取到 RT: {self.refresh_token[:15]}...")
-                        else:
-                            self._log(f"⚠️ 手动交换未获取到 RT。OpenAI 原始响应: {res}")
-                    except Exception as e:
-                        self._log(f"❌ 手动交换过程崩溃: {e}")
-                    if res and res.get("refresh_token"):
-                        self.refresh_token = res["refresh_token"]
-                        self._log(f"🔥 [SUCCESS] 手动 OAuth 交换成功获取到 RT: {self.refresh_token[:20]}...")
-                    else:
-                        self._log("⚠️ 手动交换未获取到 RT，可能账号已被标记 add_phone 或环境受阻")
-                elif code:
-                    self._log("⚠️ 提取到 Code 但缺少本地 Verifier，这通常是因为 signin 阶段注入失败")
-            except Exception as e:
-                self._log(f"手动 OAuth 交换尝试失败: {e}")
+            self._log("步骤 1.5/4: 在 callback 落地前执行手动 OAuth 交换 ...")
+            manual_tokens = self._manual_exchange_callback_tokens(callback_url)
+
+        if callback_url:
+            self._log("步骤 1.6/4: 补执行 next-auth callback ...")
+            self._finalize_nextauth_callback(
+                callback_url,
+                referer=f"{self.BASE}/auth/login",
+            )
 
         self._log("步骤 2/4: 检查 __Secure-next-auth.session-token ...")
 
         session_cookie = self.get_next_auth_session_token()
         if not session_cookie:
+            if manual_tokens and manual_tokens.get("access_token"):
+                self._log("next-auth 会话未落地，但手动换码已成功，直接返回 OAuth tokens")
+                return True, self._build_oauth_token_result(manual_tokens)
             return False, "缺少 __Secure-next-auth.session-token，注册回调可能未落地"
 
         # 尝试从 Cookie 中补齐 refresh_token（针对新版 oaistb_rt_）
@@ -703,6 +965,9 @@ class ChatGPTClient:
         self._log("步骤 3/4: 请求 ChatGPT /api/auth/session ...")
         ok, session_or_error = self.fetch_chatgpt_session()
         if not ok:
+            if manual_tokens and manual_tokens.get("access_token"):
+                self._log(f"/api/auth/session 未成功，改用手动换码结果: {session_or_error}")
+                return True, self._build_oauth_token_result(manual_tokens, session_token=session_cookie)
             return False, session_or_error
 
         session_data = session_or_error
@@ -760,6 +1025,7 @@ class ChatGPTClient:
                 allow_redirects=True,
                 timeout=30,
             )
+            self._sync_response_cookies(r)
             return r.status_code == 200
         except Exception as e:
             self._log(f"访问首页失败: {e}")
@@ -780,11 +1046,13 @@ class ChatGPTClient:
                 ),
                 timeout=30,
             )
+            self._sync_response_cookies(r)
             
             if r.status_code == 200:
                 data = r.json()
                 token = data.get("csrfToken", "")
                 if token:
+                    self._ensure_nextauth_callback_cookie()
                     self._log(f"CSRF token: {token[:20]}...")
                     return token
         except Exception as e:
@@ -829,11 +1097,13 @@ class ChatGPTClient:
                 ),
                 timeout=30
             )
+            self._sync_response_cookies(r)
             
             if r.status_code == 200:
                 data = r.json()
                 authorize_url = data.get("url", "")
                 if authorize_url:
+                    self._ensure_nextauth_callback_cookie()
                     self._log(f"获取到 authorize URL")
                     return authorize_url
         except Exception as e:
@@ -854,10 +1124,12 @@ class ChatGPTClient:
         # 保存原始的 client_id 和 redirect_uri，供后续换码使用
         self.last_oauth_client_id = query.get("client_id", [None])[0]
         self.last_oauth_redirect_uri = query.get("redirect_uri", [None])[0]
+        self.last_oauth_state = query.get("state", [None])[0]
         
         # 核心：如果我们能生成自己的挑战码，就替换掉它
         code_verifier, code_challenge = generate_pkce()
         self.last_code_verifier = code_verifier
+        self._sync_nextauth_pkce_cookie(code_verifier)
         self._log(f"🔥 [CODEX] 正在拦截 Authorize URL (ClientID: {self.last_oauth_client_id}) 并注入自定义 PKCE...")
         
         query["code_challenge"] = [code_challenge]
@@ -889,6 +1161,7 @@ class ChatGPTClient:
                     allow_redirects=True,
                     timeout=30,
                 )
+                self._sync_response_cookies(r)
                 
                 final_url = str(r.url)
                 self._log(f"重定向到: {final_url}")
@@ -916,6 +1189,60 @@ class ChatGPTClient:
             referer=referer or f"{self.AUTH}/about-you",
         )
         return ok
+
+    def _finalize_nextauth_callback(self, callback_url, referer=None):
+        target_url = str(callback_url or "").strip()
+        if not target_url:
+            return False
+
+        self._ensure_nextauth_callback_cookie()
+        try:
+            self._browser_pause()
+            response = self.session.get(
+                target_url,
+                headers=self._headers(
+                    target_url,
+                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    referer=referer or f"{self.BASE}/auth/login",
+                    navigation=True,
+                ),
+                allow_redirects=True,
+                timeout=30,
+            )
+            self._sniff_refresh_token(response)
+            self._sync_response_cookies(response)
+            callback_hit, final_url = self._extract_callback_from_response_history(
+                response,
+                fallback_url=target_url,
+            )
+            self.last_follow_callback_url = callback_hit or target_url
+            self.last_follow_final_url = final_url
+        except Exception as exc:
+            self._log(f"next-auth callback 补跳失败: {exc}")
+            return False
+
+        if self.get_next_auth_session_token():
+            return True
+
+        try:
+            self._browser_pause()
+            home = self.session.get(
+                f"{self.BASE}/",
+                headers=self._headers(
+                    f"{self.BASE}/",
+                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    referer=target_url,
+                    navigation=True,
+                ),
+                allow_redirects=True,
+                timeout=30,
+            )
+            self._sniff_refresh_token(home)
+            self._sync_response_cookies(home)
+        except Exception:
+            pass
+
+        return bool(self.get_next_auth_session_token())
     
     def register_user(self, email, password):
         """
@@ -930,15 +1257,8 @@ class ChatGPTClient:
         sentinel_header = None
         sentinel = None
         try:
-            import os
-            import sys
-            sys.path.append(os.path.abspath("src"))
-            from core.openai.sentinel_token_v2 import build_sentinel_token
-            # 提供必要的 accept 参数以符合方法定义
-            user_agent = self._headers(url, accept="application/json").get("user-agent", "")
+            user_agent = self.ua
             self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow=username_password_create")
-            
-            # 增加捕获 stdout/stderr 的机制以便诊断
             sentinel_header = build_sentinel_token(
                 self.session, 
                 self.device_id, 
@@ -951,16 +1271,16 @@ class ChatGPTClient:
             if sentinel_header:
                 self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
             else:
-                # 记录失败的具体原因（如果库支持）
-                self._log("纯 Python PoW 算法返回了空 Token，检查 Node 环境或 SDK 版本", "warning")
+                self._log("纯 Python PoW 算法返回了空 Token，检查 Node 环境或 SDK 版本")
         except Exception as e:
-            self._log(f"纯 Python PoW 算法执行崩溃: {e}", "error")
+            self._log(f"纯 Python PoW 算法执行崩溃: {e}")
             
         if not sentinel_header:
             self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")
             sentinel = self._fetch_browser_sentinel_artifacts(
                 flow="username_password_create",
                 page_url=f"{self.AUTH}/create-account/password",
+                include_passkey_capabilities=True,
             )
             sentinel_header = sentinel.token if sentinel else "{}"
             self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel)}")
@@ -981,9 +1301,11 @@ class ChatGPTClient:
             extra_headers={
                 "oai-device-id": self.device_id,
                 "OpenAI-Device-Id": self.device_id,
-                "openai-sentinel-token": sentinel_header,
+                "OpenAI-Sentinel-Token": sentinel_header,
             },
         )
+        if sentinel and getattr(sentinel, "passkey_capabilities", None):
+            headers["ext-passkey-client-capabilities"] = sentinel.passkey_capabilities
 
         headers.update(generate_datadog_trace())
         
@@ -996,6 +1318,7 @@ class ChatGPTClient:
             self._browser_pause()
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
             self._sniff_refresh_token(r)
+            self._sync_response_cookies(r)
             
             if r.status_code == 200:
                 data = r.json()
@@ -1085,6 +1408,7 @@ class ChatGPTClient:
             self._browser_pause()
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
             self._sniff_refresh_token(r)
+            self._sync_response_cookies(r)
             
             if r.status_code == 200:
                 try:
@@ -1125,12 +1449,7 @@ class ChatGPTClient:
         sentinel_header = None
         sentinel = None
         try:
-            import os
-            import sys
-            sys.path.append(os.path.abspath("src"))
-            from core.openai.sentinel_token_v2 import build_sentinel_token
-            # 提供必要的 accept 参数以符合方法定义
-            user_agent = self._headers(url, accept="application/json").get("user-agent", "")
+            user_agent = self.ua
             self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow=oauth_create_account")
             sentinel_header = build_sentinel_token(
                 self.session, 
@@ -1143,9 +1462,9 @@ class ChatGPTClient:
             if sentinel_header:
                 self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
             else:
-                self._log("纯 Python PoW 算法返回了空 Token，准备降级到浏览器", "warning")
+                self._log("纯 Python PoW 算法返回了空 Token，准备降级到浏览器")
         except Exception as e:
-            self._log(f"纯 Python PoW 算法异常: {e}", "warning")
+            self._log(f"纯 Python PoW 算法异常: {e}")
             
         if not sentinel_header:
             self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")
@@ -1182,6 +1501,7 @@ class ChatGPTClient:
             self._browser_pause()
             r = self.session.post(url, json=payload, headers=headers, timeout=30)
             self._sniff_refresh_token(r)
+            self._sync_response_cookies(r)
             
             if r.status_code == 200:
                 try:
@@ -1344,10 +1664,10 @@ class ChatGPTClient:
                             otp_verified = True
                             state = next_state
                             self.last_registration_state = state
-                            self._log("🔥 [CODEX] 邮件 OTP 验证成功，立即中断注册流以切换至稳定 OAuth 承接逻辑...")
-                            return True, "otp_verified_interrupted"
+                            self._log(f"验证成功，下一状态: {describe_flow_state(state)}")
+                            break # 跳出收码循环，进入外部状态机处理
                         else:
-                            self._log(f"验证码 {otp_code} 验证失败，可能由于延迟导致码失效，继续收新码...")
+                            self._log(f"验证码 {otp_code} 验证失败，继续收新码...")
                             tried_codes.add(otp_code)
                     
                     # 超时未收到或码无效，触发重发
@@ -1358,6 +1678,8 @@ class ChatGPTClient:
                     continue
                 return False, f"收码或校验超时 ({max_total_wait}s)"
 
+            if self._state_is_about_you(state):
+                self._log(f"检测到 about-you 阶段，正在提交用户信息: {first_name} {last_name}")
                 success, next_state = self.create_account(
                     first_name,
                     last_name,
@@ -1371,9 +1693,14 @@ class ChatGPTClient:
                 state = next_state
                 self.last_registration_state = state
                 
-                # 在资料提交成功后中断，这才是“黄金路径”的中断点
-                if getattr(self, "stop_before_about_you_submission", False):
-                    self._log("🔥 [CODEX] 账号资料(姓名+生日)已强推成功，命中黄金中断点，准备二次重登接力...")
+                # 默认先完成回调落地，再决定是否中断，避免打断 OAuth / next-auth 状态衔接。
+                if (
+                    getattr(self, "interrupt_after_about_you", False)
+                    and (not self._state_requires_navigation(state))
+                    and (not self._is_registration_complete_state(state))
+                    and (not self._state_is_add_phone(state))
+                ):
+                    self._log("🔥 [CODEX] 账号资料(姓名+生日)已提交完成，回调已落地后执行中断接力...")
                     return True, "otp_verified_interrupted"
                 
                 continue

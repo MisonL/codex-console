@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 from curl_cffi import requests as cffi_requests
 
+from ..proxy_utils import build_requests_proxy_map, normalize_proxy_url
 from ...config.constants import (
     OAUTH_CLIENT_ID,
     OAUTH_AUTH_URL,
@@ -141,12 +142,8 @@ def _post_form(
         响应 JSON 数据
     """
     # 构建代理配置
-    proxies = None
-    if proxy_url:
-        proxies = {
-            "http": proxy_url,
-            "https": proxy_url,
-        }
+    normalized_proxy = normalize_proxy_url(proxy_url)
+    proxies = build_requests_proxy_map(normalized_proxy)
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -332,7 +329,7 @@ class OAuthManager:
         self.token_url = token_url
         self.redirect_uri = redirect_uri
         self.scope = scope
-        self.proxy_url = proxy_url
+        self.proxy_url = normalize_proxy_url(proxy_url)
         self.originator = str(originator or "").strip()
 
     def start_oauth(self) -> OAuthStart:
