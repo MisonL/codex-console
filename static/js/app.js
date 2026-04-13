@@ -2620,9 +2620,24 @@ function connectBatchWebSocket(batchId) {
       if (data.type === "log") {
         const logType = getLogType(data.message);
         addLog(logType, data.message);
+        
+        // 接入全局监控日志
+        window.taskMonitor.updateTask(currentBatchId || "batch-task", {
+          title: "批量注册任务",
+          log: data.message,
+          logType: logType
+        });
       } else if (data.type === "status") {
-        // 更新进度
+        // 更新全局监控进度
         if (data.total !== undefined) {
+          const progress = Math.round(((data.completed || 0) / (data.total || 1)) * 100);
+          window.taskMonitor.updateTask(currentBatchId || "batch-task", {
+            title: "批量注册任务",
+            progress: progress,
+            stats: { success: data.success || 0, failed: data.failed || 0, total: data.total },
+            status: data.status
+          });
+
           updateBatchProgress({
             total: data.total,
             completed: data.completed || 0,
@@ -2630,6 +2645,7 @@ function connectBatchWebSocket(batchId) {
             failed: data.failed || 0,
           });
         }
+
 
         // 检查是否完成
         if (

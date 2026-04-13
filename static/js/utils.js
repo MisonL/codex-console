@@ -1365,3 +1365,188 @@ window.modal = modal;
 window.openModal = openModal;
 window.closeModal = closeModal;
 window.createManagedWebSocket = createManagedWebSocket;
+
+/**
+ * 全局任务监控中心管理器
+ */
+class GlobalTaskManager {
+  constructor() {
+    this.tasks = new Map();
+    this.container = null;
+    this.activeDetailId = null;
+    this.init();
+  }
+
+  init() {
+    this.container = document.getElementById("global-task-container");
+    if (!this.container) return;
+
+    // 绑定模态框内的操作
+    document.getElementById("task-detail-clear-logs")?.addEventListener("click", () => {
+      const logs = document.getElementById("task-detail-logs");
+      if (logs) logs.innerHTML = "";
+    });
+
+    document.getElementById("task-detail-cancel-btn")?.addEventListener("click", () => {
+      if (this.activeDetailId) this.cancelTask(this.activeDetailId);
+    });
+  }
+
+  updateTask(taskId, data) {
+    if (!taskId) return;
+    
+    let task = this.tasks.get(taskId);
+    if (!task) {
+      task = {
+        id: taskId,
+        title: data.title || "未知任务",
+        progress: 0,
+        stats: { success: 0, failed: 0, total: 0 },
+        status: "pending",
+        logs: [],
+        startTime: Date.now()
+      };
+      this.tasks.set(taskId, task);
+      this.renderCard(taskId);
+    }
+
+    // 更新数据
+    if (data.progress !== undefined) task.progress = data.progress;
+    if (data.status !== undefined) task.status = data.status;
+    if (data.stats) task.stats = { ...task.stats, ...data.stats };
+    if (data.log) {
+      const logEntry = { time: new Date().toLocaleTimeString(), message: data.log, type: data.logType || "info" };
+      task.logs.push(logEntry);
+      if (this.activeDetailId === taskId) this.appendLogToModal(logEntry);
+    }
+
+    this.updateCardUI(taskId);
+    if (this.activeDetailId === taskId) this.updateModalUI(taskId);
+
+    // 自动清理逻辑：如果是完成或失败，允许手动关闭，但不自动消失
+    if (task.status === "completed" || task.status === "failed") {
+      const card = document.getElementById(`task-card-${taskId}`);
+      if (card) {
+        card.querySelector(".task-card-status").textContent = task.status === "completed" ? "已完成" : "失败";
+        card.classList.add("finished");
+      }
+    }
+  }
+
+  renderCard(taskId) {
+    const task = this.tasks.get(taskId);
+    const card = document.createElement("div");
+    card.id = `task-card-${taskId}`;
+    card.className = "task-card";
+    card.innerHTML = `
+      <div class="task-card-header">
+        <span class="task-card-title">${escapeHtml(task.title)}</span>
+        <span class="task-card-status">运行中</span>
+      </div>
+      <div class="task-card-progress-wrapper">
+        <div class="task-card-progress-bar"></div>
+      </div>
+      <div class="task-card-stats">
+        <span>成功: <b class="success-count">0</b></span>
+        <span>失败: <b class="failed-count">0</b></span>
+        <span>总计: <b class="total-count">0</b></span>
+      </div>
+      <button class="toast-close" style="position:absolute; top:8px; right:8px; display:none;">x</button>
+    `;
+
+    card.addEventListener("click", (e) => {
+      if (e.target.classList.contains("toast-close")) {
+        this.tasks.delete(taskId);
+        card.remove();
+        return;
+      }
+      this.openDetail(taskId);
+    });
+
+    this.container.appendChild(card);
+  }
+
+  updateCardUI(taskId) {
+    const task = this.tasks.get(taskId);
+    const card = document.getElementById(`task-card-${taskId}`);
+    if (!card) return;
+
+    card.querySelector(".task-card-progress-bar").style.width = `${task.progress}%`;
+    card.querySelector(".success-count").textContent = task.stats.success;
+    card.querySelector(".failed-count").textContent = task.stats.failed;
+    card.querySelector(".total-count").textContent = task.stats.total;
+
+    if (task.status === "completed" || task.status === "failed") {
+      card.querySelector(".toast-close").style.display = "block";
+    }
+  }
+
+  openDetail(taskId) {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+
+    this.activeDetailId = taskId;
+    document.getElementById("task-detail-title").textContent = task.title;
+    document.getElementById("task-detail-id").textContent = taskId;
+    
+    // 初始化日志和统计
+    const logContainer = document.getElementById("task-detail-logs");
+    logContainer.innerHTML = "";
+    task.logs.forEach(log => this.appendLogToModal(log));
+    
+    this.updateModalUI(taskId);
+    window.openModal("task-detail-modal");
+  }
+
+  updateModalUI(taskId) {
+    const task = this.tasks.get(taskId);
+    const statsContainer = document.getElementById("task-detail-stats");
+    
+    statsContainer.innerHTML = `
+      <div class="task-detail-stat-item">
+        <span class="task-detail-stat-value">${task.progress}%</span>
+        <span class="task-detail-stat-label">进度</span>
+      </div>
+      <div class="task-detail-stat-item">
+        <span class="task-detail-stat-value">${task.stats.success}</span>
+        <span class="task-detail-stat-label">成功</span>
+      </div>
+      <div class="task-detail-stat-item">
+        <span class="task-detail-stat-value">${task.stats.failed}</span>
+        <span class="task-detail-stat-label">失败</span>
+      </div>
+      <div class="task-detail-stat-item">
+        <span class="task-detail-stat-value">${task.stats.total}</span>
+        <span class="task-detail-stat-label">总计</span>
+      </div>
+    `;
+
+    document.getElementById("task-detail-status").textContent = task.status;
+    const elapsed = Math.floor((Date.now() - task.startTime) / 1000);
+    document.getElementById("task-detail-duration").textContent = `${elapsed}s`;
+  }
+
+  appendLogToModal(log) {
+    const logContainer = document.getElementById("task-detail-logs");
+    if (!logContainer) return;
+
+    const div = document.createElement("div");
+    div.className = `log-entry log-${log.type}`;
+    div.innerHTML = `<span class="log-time">[${log.time}]</span><span class="log-msg">${escapeHtml(log.message)}</span>`;
+    logContainer.appendChild(div);
+    logContainer.scrollTop = logContainer.scrollHeight;
+  }
+
+  async cancelTask(taskId) {
+    if (!confirm("确定要取消此任务吗？")) return;
+    try {
+      await api.post(`/registration/tasks/${taskId}/cancel`);
+      toast.success("取消请求已提交");
+    } catch (e) {
+      toast.error("取消失败: " + e.message);
+    }
+  }
+}
+
+window.taskMonitor = new GlobalTaskManager();
+

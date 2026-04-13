@@ -1743,7 +1743,18 @@ async function runBatchRefreshTask(payload, count, sourceLabel, options = {}) {
       const paused =
         Boolean(progressTask?.paused) ||
         String(progressTask?.status || "").toLowerCase() === "paused";
+      
+      // 接入全局监控
+      window.taskMonitor.updateTask(taskId, {
+        title: "批量刷新 Token",
+        progress: Math.round((completed / (total || 1)) * 100),
+        stats: { success: progressTask?.result?.success_count || 0, failed: progressTask?.result?.failed_count || 0, total: total },
+        status: progressTask?.status,
+        log: progressTask?.message
+      });
+
       elements.batchRefreshBtn.textContent = paused
+
         ? `已暂停 ${completed}/${total}`
         : `刷新中 ${completed}/${total}`;
       if (elements.quickRefreshBtn && !isQuickWorkflowRunning) {
@@ -1868,7 +1879,18 @@ async function runBatchValidateTask(payload, count, sourceLabel, options = {}) {
       const paused =
         Boolean(progressTask?.paused) ||
         String(progressTask?.status || "").toLowerCase() === "paused";
+
+      // 接入全局监控
+      window.taskMonitor.updateTask(taskId, {
+        title: "批量验证 Token",
+        progress: Math.round((completed / (total || 1)) * 100),
+        stats: { success: progressTask?.result?.valid_count || 0, failed: progressTask?.result?.invalid_count || 0, total: total },
+        status: progressTask?.status,
+        log: progressTask?.message
+      });
+
       elements.batchValidateBtn.textContent = paused
+
         ? `已暂停 ${completed}/${total}`
         : `验证中 ${completed}/${total}`;
       applyValidatedStatuses(progressTask);
@@ -1991,7 +2013,18 @@ async function runBatchCheckSubscriptionTask(
       const paused =
         Boolean(progressTask?.paused) ||
         String(progressTask?.status || "").toLowerCase() === "paused";
+
+      // 接入全局监控
+      window.taskMonitor.updateTask(taskId, {
+        title: "批量检测订阅",
+        progress: Math.round((completed / (total || 1)) * 100),
+        stats: { success: progressTask?.result?.success_count || 0, failed: progressTask?.result?.failed_count || 0, total: total },
+        status: progressTask?.status,
+        log: progressTask?.message
+      });
+
       elements.batchCheckSubBtn.textContent = paused
+
         ? `已暂停 ${completed}/${total}`
         : `检测中 ${completed}/${total}`;
       if (onProgress) {
