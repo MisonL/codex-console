@@ -43,6 +43,7 @@ def _safe_positive_int(value: Any) -> Optional[int]:
 class JSONEncodedDict(TypeDecorator):
     """JSON 编码字典类型"""
     impl = Text
+    cache_ok = True
 
     def process_bind_param(self, value: Optional[Dict[str, Any]], dialect):
         if value is None:
@@ -75,7 +76,7 @@ class Account(Base):
     registered_at = Column(DateTime, default=utcnow_naive)
     last_refresh = Column(DateTime)  # 最后刷新时间
     expires_at = Column(DateTime)  # Token 过期时间
-    status = Column(String(20), default='active')  # 'active', 'expired', 'banned', 'failed'
+    status = Column(String(20), default='active')  # 'active', 'pending_token', 'pending_phone', 'expired', 'banned', 'failed'
     extra_data = Column(JSONEncodedDict)  # 额外信息存储
     cpa_uploaded = Column(Boolean, default=False)  # 是否已上传到 CPA
     cpa_uploaded_at = Column(DateTime)  # 上传时间
@@ -91,7 +92,7 @@ class Account(Base):
     subscription_type = Column(String(20))  # None / 'plus' / 'team'
     subscription_at = Column(DateTime)  # 订阅开通时间
     cookies = Column(Text)  # 完整 cookie 字符串，用于支付请求
-    created_at = Column(DateTime, default=utcnow_naive)
+    created_at = Column(DateTime, default=utcnow_naive, index=True)
     updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
     bind_card_tasks = relationship("BindCardTask", back_populates="account")
     team_invite_records = relationship("TeamInviteRecord", back_populates="inviter_account")

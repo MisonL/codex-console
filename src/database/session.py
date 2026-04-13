@@ -65,7 +65,7 @@ class DatabaseSessionManager:
         if self.database_url.startswith("sqlite"):
             kwargs["connect_args"] = {
                 "check_same_thread": False,
-                "timeout": 30,
+                "timeout": 60,
             }
             return kwargs
 
@@ -90,7 +90,7 @@ class DatabaseSessionManager:
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA temp_store=MEMORY")
-            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA busy_timeout=60000")
             cursor.close()
 
     def get_db(self) -> Generator[Session, None, None]:
@@ -357,6 +357,9 @@ class DatabaseSessionManager:
                 ))
                 conn.execute(text(
                     "CREATE INDEX IF NOT EXISTS ix_accounts_last_used_at ON accounts (last_used_at)"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_accounts_created_at ON accounts (created_at DESC)"
                 ))
                 conn.commit()
             except Exception as e:

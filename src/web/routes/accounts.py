@@ -18,13 +18,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Body
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func
+from sqlalchemy import String, cast, func
 
 from ...config.constants import AccountStatus
 from ...config.settings import get_settings
 from ...core.openai.codex_auth_workbench import (
+    CODEX_AUTH_EXTRA_KEY,
     CODEX_AUTH_BLOCKED,
     CODEX_AUTH_HEALTHY,
+    CODEX_AUTH_MISSING,
     CODEX_AUTH_REPAIRABLE,
     CodexAuthEngine,
     build_codex_auth_zip_entries,
@@ -1152,6 +1154,10 @@ class AccountResponse(BaseModel):
     expires_at: Optional[str] = None
     status: str
     proxy_used: Optional[str] = None
+    account_label: Optional[str] = None
+    role_tag: Optional[str] = None
+    priority: Optional[int] = None
+    last_used_at: Optional[str] = None
     cpa_uploaded: bool = False
     cpa_uploaded_at: Optional[str] = None
     subscription_type: Optional[str] = None
@@ -1313,6 +1319,10 @@ def account_to_response(account: Account) -> AccountResponse:
         expires_at=account.expires_at.isoformat() if account.expires_at else None,
         status=account.status,
         proxy_used=account.proxy_used,
+        account_label=getattr(account, "account_label", None),
+        role_tag=getattr(account, "role_tag", None),
+        priority=getattr(account, "priority", None),
+        last_used_at=account.last_used_at.isoformat() if getattr(account, "last_used_at", None) else None,
         cpa_uploaded=account.cpa_uploaded or False,
         cpa_uploaded_at=account.cpa_uploaded_at.isoformat() if account.cpa_uploaded_at else None,
         subscription_type=account.subscription_type,
@@ -1322,6 +1332,154 @@ def account_to_response(account: Account) -> AccountResponse:
         updated_at=account.updated_at.isoformat() if account.updated_at else None,
         codex_auth=codex_auth,
     )
+
+
+def _has_non_empty_text_sql(column):
+    return func.length(func.trim(func.coalesce(column, ""))) > 0
+
+
+def _to_bool_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or "").strip().lower()
+    return text not in {"", "0", "false", "none", "null"}
+
+
+def _extract_codex_auth_meta(extra_data_text: Optional[str]) -> Dict[str, Any]:
+    text = str(extra_data_text or "").strip()
+    if not text or CODEX_AUTH_EXTRA_KEY not in text:
+        return {}
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return {}
+    codex_auth = payload.get(CODEX_AUTH_EXTRA_KEY)
+    return dict(codex_auth) if isinstance(codex_auth, dict) else {}
+
+
+def _build_list_codex_auth_payload(
+    *,
+    has_access_token: Any,
+    has_refresh_token: Any,
+    has_id_token: Any,
+    has_account_id: Any,
+    has_password: Any,
+    has_session_material: Any,
+    extra_data_text: Optional[str],
+) -> Dict[str, Any]:
+    meta = _extract_codex_auth_meta(extra_data_text)
+    complete = all(
+        [
+            _to_bool_flag(has_access_token),
+            _to_bool_flag(has_refresh_token),
+            _to_bool_flag(has_id_token),
+            _to_bool_flag(has_account_id),
+        ]
+    )
+    artifact_path = str(meta.get("artifact_path") or "").strip()
+    generated = bool(meta.get("generated")) and bool(artifact_path)
+    last_error = str(meta.get("last_error") or "").strip()
+    last_block_reason = str(meta.get("last_block_reason") or "").strip()
+    payload = {
+        "generated": generated,
+        "export_ready": complete,
+        "complete": complete,
+        "generated_at": str(meta.get("generated_at") or "") or None,
+        "last_audit_at": str(meta.get("last_audit_at") or "") or None,
+        "last_success_at": str(meta.get("last_success_at") or "") or None,
+        "last_error": last_error,
+        "last_block_reason": last_block_reason,
+        "artifact_path": artifact_path,
+    }
+    if complete:
+        return {
+            **payload,
+            "health": CODEX_AUTH_HEALTHY,
+            "label": "健康",
+            "reason": "完整 Managed Auth 可用",
+        }
+    if last_block_reason:
+        return {
+            **payload,
+            "generated": False,
+            "export_ready": False,
+            "health": CODEX_AUTH_BLOCKED,
+            "label": "受阻",
+            "reason": last_block_reason,
+        }
+    missing = []
+    if not _to_bool_flag(has_password):
+        missing.append("password")
+    if not _to_bool_flag(has_session_material):
+        missing.append("session")
+    if missing:
+        return {
+            **payload,
+            "generated": False,
+            "export_ready": False,
+            "health": CODEX_AUTH_MISSING,
+            "label": "缺条件",
+            "reason": f"缺少前置条件: {', '.join(missing)}",
+        }
+    return {
+        **payload,
+        "generated": False,
+        "export_ready": False,
+        "health": CODEX_AUTH_REPAIRABLE,
+        "label": "可修复",
+        "reason": "可尝试严格 Codex Auth 修复",
+    }
+
+
+def _account_list_row_to_response(row: Any) -> AccountResponse:
+    codex_auth = _build_list_codex_auth_payload(
+        has_access_token=getattr(row, "has_access_token", False),
+        has_refresh_token=getattr(row, "has_refresh_token", False),
+        has_id_token=getattr(row, "has_id_token", False),
+        has_account_id=getattr(row, "has_account_id", False),
+        has_password=getattr(row, "has_password", False),
+        has_session_material=getattr(row, "has_session_material", False),
+        extra_data_text=getattr(row, "extra_data_text", None),
+    )
+    return AccountResponse(
+        id=row.id,
+        email=row.email,
+        password=row.password,
+        email_service=row.email_service,
+        status=row.status,
+        account_label=getattr(row, "account_label", None),
+        role_tag=getattr(row, "role_tag", None),
+        priority=getattr(row, "priority", None),
+        last_used_at=row.last_used_at.isoformat() if getattr(row, "last_used_at", None) else None,
+        cpa_uploaded=bool(getattr(row, "cpa_uploaded", False)),
+        cpa_uploaded_at=row.cpa_uploaded_at.isoformat() if getattr(row, "cpa_uploaded_at", None) else None,
+        subscription_type=getattr(row, "subscription_type", None),
+        last_refresh=row.last_refresh.isoformat() if getattr(row, "last_refresh", None) else None,
+        created_at=row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+        codex_auth=codex_auth,
+    )
+
+
+def _apply_account_list_filters(
+    query,
+    *,
+    status: Optional[str],
+    email_service: Optional[str],
+    search: Optional[str],
+):
+    if status:
+        query = _apply_status_filter(query, status)
+    if email_service:
+        query = query.filter(Account.email_service == email_service)
+    if search:
+        search_pattern = f"%{search}%"
+        query = query.filter(
+            (Account.email.ilike(search_pattern)) |
+            (Account.account_id.ilike(search_pattern))
+        )
+    return query
 
 
 def _extract_cookie_value(cookies_text: Optional[str], cookie_name: str) -> str:
@@ -1951,35 +2109,61 @@ def list_accounts(
     支持分页、状态筛选、邮箱服务筛选和搜索
     """
     with get_db() as db:
-        # 构建查询
-        query = db.query(Account)
-
-        # 状态筛选
-        if status:
-            query = _apply_status_filter(query, status)
-
-        # 邮箱服务筛选
-        if email_service:
-            query = query.filter(Account.email_service == email_service)
-
-        # 搜索
-        if search:
-            search_pattern = f"%{search}%"
-            query = query.filter(
-                (Account.email.ilike(search_pattern)) |
-                (Account.account_id.ilike(search_pattern))
-            )
-
-        # 统计总数
-        total = query.count()
-
-        # 分页
         offset = (page - 1) * page_size
-        accounts = query.order_by(Account.created_at.desc()).offset(offset).limit(page_size).all()
+        extra_data_text = cast(Account.__table__.c.extra_data, String).label("extra_data_text")
+        list_query = db.query(
+            Account.id.label("id"),
+            Account.email.label("email"),
+            Account.password.label("password"),
+            Account.email_service.label("email_service"),
+            Account.status.label("status"),
+            Account.account_label.label("account_label"),
+            Account.role_tag.label("role_tag"),
+            Account.priority.label("priority"),
+            Account.last_used_at.label("last_used_at"),
+            Account.cpa_uploaded.label("cpa_uploaded"),
+            Account.cpa_uploaded_at.label("cpa_uploaded_at"),
+            Account.subscription_type.label("subscription_type"),
+            Account.last_refresh.label("last_refresh"),
+            Account.created_at.label("created_at"),
+            _has_non_empty_text_sql(Account.access_token).label("has_access_token"),
+            _has_non_empty_text_sql(Account.refresh_token).label("has_refresh_token"),
+            _has_non_empty_text_sql(Account.id_token).label("has_id_token"),
+            _has_non_empty_text_sql(Account.account_id).label("has_account_id"),
+            _has_non_empty_text_sql(Account.password).label("has_password"),
+            (_has_non_empty_text_sql(Account.session_token) | _has_non_empty_text_sql(Account.cookies)).label(
+                "has_session_material"
+            ),
+            extra_data_text,
+        )
+        list_query = _apply_account_list_filters(
+            list_query,
+            status=status,
+            email_service=email_service,
+            search=search,
+        )
+        accounts = (
+            list_query
+            .order_by(Account.created_at.desc(), Account.id.desc())
+            .offset(offset)
+            .limit(page_size)
+            .all()
+        )
+        if page == 1 and len(accounts) < page_size:
+            total = len(accounts)
+        else:
+            total_query = db.query(func.count(Account.id))
+            total_query = _apply_account_list_filters(
+                total_query,
+                status=status,
+                email_service=email_service,
+                search=search,
+            )
+            total = int(total_query.scalar() or 0)
 
         return AccountListResponse(
             total=total,
-            accounts=[account_to_response(acc) for acc in accounts]
+            accounts=[_account_list_row_to_response(row) for row in accounts]
         )
 
 
