@@ -39,6 +39,10 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
     && python -m playwright install --with-deps chromium
 
+# 安装 Sentinel VM 的 Node 依赖，避免依赖本地未入库的 node_modules
+COPY src/core/openai/sentinel_vm/package*.json /app/src/core/openai/sentinel_vm/
+RUN cd /app/src/core/openai/sentinel_vm && npm ci --omit=dev
+
 # 复制项目代码
 COPY . .
 COPY scripts/docker/start-webui.sh /app/scripts/docker/start-webui.sh
