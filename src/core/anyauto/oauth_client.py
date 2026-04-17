@@ -25,6 +25,14 @@ from .utils import (
 )
 from ..openai.sentinel_browser import fetch_browser_sentinel_artifacts
 from .sentinel_token import build_sentinel_token
+from ..proxy_utils import is_retryable_proxy_probe
+
+
+ACCOUNT_DEACTIVATED_ERROR = "account_deactivated"
+OAUTH_OTP_TOTAL_WAIT_SECONDS = 20
+OAUTH_OTP_WAIT_SLICE_SECONDS = 5
+OAUTH_OTP_EMPTY_ROUNDS_BEFORE_RESEND = 2
+OAUTH_OTP_POST_RESEND_GRACE_SECONDS = 8
 
 
 class OAuthClient:
@@ -56,37 +64,190 @@ class OAuthClient:
         self.verbose = verbose
         self.browser_mode = browser_mode or "protocol"
         self.last_error = ""
+        self.last_workspace_id = ""
+        self.last_state = FlowState()
+        self.last_registration_state = FlowState()
+        self.device_id = ""
+        self.ua = ""
+        self.sec_ch_ua = ""
+        self.impersonate = ""
+        self.chrome_full = ""
+        self.last_oauth_state = ""
+        self.last_code_verifier = ""
+        self.last_oauth_client_id = ""
+        self.last_oauth_redirect_uri = ""
         
         # 创建 session
         self.session = curl_requests.Session()
-        if self.proxy:
-            self.session.proxies = {"http": self.proxy, "https": self.proxy}
+        self._apply_proxy_to_session(self.session)
     
     def _log(self, msg, level="info"):
         """输出日志"""
         if self.verbose:
             print(f"  [OAuth] {msg}")
 
+    def _apply_proxy_to_session(self, session):
+        if session is None or not self.proxy:
+            return
+        try:
+            session.proxies = {"http": self.proxy, "https": self.proxy}
+        except Exception:
+            pass
+
     def apply_auth_context(self, context):
         context = dict(context or {})
         session = context.get("session")
         if session is not None:
             self.session = session
-        accept_language = str(context.get("accept_language") or "").strip()
-        if accept_language:
-            try:
-                self.session.headers["Accept-Language"] = accept_language
-            except Exception:
-                pass
+        self._apply_proxy_to_session(self.session)
+
         self.browser_mode = str(context.get("browser_mode") or self.browser_mode or "protocol")
+        self.device_id = str(context.get("device_id") or self.device_id or "").strip()
+        self.ua = str(context.get("user_agent") or self.ua or "").strip()
+        self.sec_ch_ua = str(context.get("sec_ch_ua") or self.sec_ch_ua or "").strip()
+        self.impersonate = str(context.get("impersonate") or self.impersonate or "").strip()
+        self.chrome_full = str(context.get("chrome_full") or self.chrome_full or "").strip()
+
+        accept_language = str(context.get("accept_language") or "").strip()
         self.last_oauth_state = str(context.get("last_oauth_state") or "").strip()
         self.last_code_verifier = str(context.get("last_code_verifier") or "").strip()
+        self.last_oauth_client_id = str(context.get("last_oauth_client_id") or "").strip()
+        self.last_oauth_redirect_uri = str(context.get("last_oauth_redirect_uri") or "").strip()
+
+        state = context.get("last_registration_state")
+        if isinstance(state, FlowState):
+            self.last_registration_state = state
+            self.last_state = state
+        elif isinstance(context.get("last_state"), FlowState):
+            self.last_state = context.get("last_state")
+
+        header_updates = {}
+        if accept_language:
+            header_updates["Accept-Language"] = accept_language
+        if self.ua:
+            header_updates["User-Agent"] = self.ua
+        if self.sec_ch_ua:
+            header_updates["sec-ch-ua"] = self.sec_ch_ua
+        if header_updates:
+            try:
+                self.session.headers.update(header_updates)
+            except Exception:
+                pass
+
+        if self.device_id:
+            seed_oai_device_cookie(self.session, self.device_id)
         return self.session
+
+    def _recreate_session(self):
+        try:
+            accept_language = str(self.session.headers.get("Accept-Language") or "").strip()
+        except Exception:
+            accept_language = ""
+        session = curl_requests.Session()
+        self._apply_proxy_to_session(session)
+        self.session = session
+
+        header_updates = {}
+        if self.ua:
+            header_updates["User-Agent"] = self.ua
+        if self.sec_ch_ua:
+            header_updates["sec-ch-ua"] = self.sec_ch_ua
+        if accept_language:
+            header_updates["Accept-Language"] = accept_language
+        if header_updates:
+            try:
+                self.session.headers.update(header_updates)
+            except Exception:
+                pass
+
+        if self.device_id:
+            seed_oai_device_cookie(self.session, self.device_id)
+
+    def _canonical_consent_url(self):
+        return f"{self.oauth_issuer}/sign-in-with-chatgpt/codex/consent"
 
     def _set_error(self, message):
         self.last_error = str(message or "").strip()
         if self.last_error:
             self._log(self.last_error)
+
+    def _is_account_deactivated_marker(self, text):
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        markers = (
+            "account_deactivated",
+            "access deactivated",
+            "account deactivated",
+            "deactivated account",
+            "your account has been deactivated",
+        )
+        return any(marker in normalized for marker in markers)
+
+    def _trip_account_deactivated(self, source, detail=""):
+        if detail:
+            self._log(f"{source} 命中 deactivated 信号: {str(detail)[:200]}", level="warning")
+        self._set_error(ACCOUNT_DEACTIVATED_ERROR)
+
+    def _response_hits_account_deactivated(self, response, source):
+        preview = self._response_body_preview(response, limit=600)
+        if self._is_account_deactivated_marker(preview):
+            self._trip_account_deactivated(source, preview)
+            return True
+        return False
+
+    def _state_hits_account_deactivated(self, state: FlowState, source: str):
+        if self._is_account_deactivated_marker(
+            " ".join(
+                part
+                for part in (
+                    getattr(state, "page_type", ""),
+                    getattr(state, "current_url", ""),
+                    getattr(state, "continue_url", ""),
+                    str(getattr(state, "raw", "") or ""),
+                )
+                if part
+            )
+        ):
+            self._trip_account_deactivated(source, describe_flow_state(state))
+            return True
+        return False
+
+    def _should_retry_proxy_exception(self, exc):
+        if not self.proxy:
+            return False
+        message = str(exc or "").strip()
+        lower_message = message.lower()
+        if is_retryable_proxy_probe(None, message):
+            return True
+        retry_markers = (
+            "getaddrinfo",
+            "could not resolve proxy",
+            "failed to resolve proxy",
+            "failed to resolve host",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "nodename nor servname provided",
+            "connection reset by peer",
+        )
+        return any(marker in lower_message for marker in retry_markers)
+
+    def _request_with_proxy_retry(self, method, url, *, retry_label="", max_attempts=None, **kwargs):
+        attempts = max(1, int(max_attempts or (3 if self.proxy else 1)))
+        request_fn = getattr(self.session, method)
+
+        for attempt in range(attempts):
+            try:
+                return request_fn(url, **kwargs)
+            except Exception as exc:
+                if attempt >= attempts - 1 or (not self._should_retry_proxy_exception(exc)):
+                    raise
+                label = retry_label or f"{method.upper()} {url}"
+                self._log(
+                    f"{label} 命中代理解析/连接异常，准备重试 {attempt + 2}/{attempts}: {str(exc)[:160]}",
+                    level="warning",
+                )
+                time.sleep(0.5 * (attempt + 1))
 
     def _sync_response_cookies(self, response):
         important_prefixes = (
@@ -436,10 +597,17 @@ class OAuthClient:
                     kwargs["impersonate"] = impersonate
 
                 self._browser_pause(0.12, 0.3)
-                r = self.session.get(current_url, **kwargs)
+                r = self._request_with_proxy_retry(
+                    "get",
+                    current_url,
+                    retry_label=f"oauth follow[{hop + 1}]",
+                    **kwargs,
+                )
                 last_url = str(r.url)
                 self._sync_response_cookies(r)
                 self._log(f"follow[{hop + 1}] {r.status_code} {last_url[:120]}")
+                if self._response_hits_account_deactivated(r, f"follow[{hop + 1}]"):
+                    return None, self._state_from_url(last_url or current_url)
             except Exception as e:
                 maybe_localhost = re.search(r'(https?://localhost[^\s\'\"]+)', str(e))
                 if maybe_localhost:
@@ -501,11 +669,18 @@ class OAuthClient:
                 kwargs["impersonate"] = impersonate
 
             self._browser_pause()
-            r = self.session.get(authorize_url, **kwargs)
+            r = self._request_with_proxy_retry(
+                "get",
+                authorize_url,
+                retry_label="/oauth/authorize",
+                **kwargs,
+            )
             authorize_final_url = str(r.url)
             self._sync_response_cookies(r)
             redirects = len(getattr(r, "history", []) or [])
             self._log(f"/oauth/authorize -> {r.status_code}, redirects={redirects}")
+            if self._response_hits_account_deactivated(r, "/oauth/authorize"):
+                return authorize_final_url
 
             has_login_session = any(
                 (cookie.name if hasattr(cookie, "name") else str(cookie)) == "login_session"
@@ -538,11 +713,18 @@ class OAuthClient:
                 kwargs["impersonate"] = impersonate
 
             self._browser_pause()
-            r2 = self.session.get(oauth2_url, **kwargs)
+            r2 = self._request_with_proxy_retry(
+                "get",
+                oauth2_url,
+                retry_label="/api/oauth/oauth2/auth",
+                **kwargs,
+            )
             authorize_final_url = str(r2.url)
             self._sync_response_cookies(r2)
             redirects2 = len(getattr(r2, "history", []) or [])
             self._log(f"/api/oauth/oauth2/auth -> {r2.status_code}, redirects={redirects2}")
+            if self._response_hits_account_deactivated(r2, "/api/oauth/oauth2/auth"):
+                return authorize_final_url
 
             has_login_session = any(
                 (cookie.name if hasattr(cookie, "name") else str(cookie)) == "login_session"
@@ -608,9 +790,16 @@ class OAuthClient:
                 kwargs["impersonate"] = impersonate
 
             self._browser_pause()
-            r = self.session.post(request_url, **kwargs)
+            r = self._request_with_proxy_retry(
+                "post",
+                request_url,
+                retry_label="/authorize/continue",
+                **kwargs,
+            )
             self._sync_response_cookies(r)
             self._log(f"/authorize/continue -> {r.status_code}")
+            if self._response_hits_account_deactivated(r, "/authorize/continue"):
+                return None
 
             if self._is_auth_state_failure(r) and authorize_url and authorize_params:
                 self._log("检测到 auth state 断裂，重新 bootstrap...")
@@ -634,9 +823,16 @@ class OAuthClient:
                 if impersonate:
                     kwargs["impersonate"] = impersonate
                 self._browser_pause()
-                r = self.session.post(request_url, **kwargs)
+                r = self._request_with_proxy_retry(
+                    "post",
+                    request_url,
+                    retry_label="/authorize/continue retry",
+                    **kwargs,
+                )
                 self._sync_response_cookies(r)
                 self._log(f"/authorize/continue(重试) -> {r.status_code}")
+                if self._response_hits_account_deactivated(r, "/authorize/continue retry"):
+                    return None
 
             if r.status_code != 200:
                 self._set_error(self._format_http_failure("提交邮箱失败", r))
@@ -644,6 +840,8 @@ class OAuthClient:
 
             data = r.json()
             flow_state = self._state_from_payload(data, current_url=str(r.url) or request_url)
+            if self._state_hits_account_deactivated(flow_state, "authorize_continue_state"):
+                return None
             self._log(describe_flow_state(flow_state))
             return flow_state
         except Exception as e:
@@ -711,8 +909,15 @@ class OAuthClient:
                 kwargs["impersonate"] = impersonate
 
             self._browser_pause()
-            r = self.session.post(request_url, **kwargs)
+            r = self._request_with_proxy_retry(
+                "post",
+                request_url,
+                retry_label="/password/verify",
+                **kwargs,
+            )
             self._log(f"/password/verify -> {r.status_code}")
+            if self._response_hits_account_deactivated(r, "/password/verify"):
+                return None
 
             if r.status_code != 200:
                 self._set_error(f"密码验证失败: {r.status_code} - {r.text[:180]}")
@@ -720,13 +925,25 @@ class OAuthClient:
 
             data = r.json()
             flow_state = self._state_from_payload(data, current_url=str(r.url) or request_url)
+            if self._state_hits_account_deactivated(flow_state, "password_verify_state"):
+                return None
             self._log(f"verify {describe_flow_state(flow_state)}")
             return flow_state
         except Exception as e:
             self._set_error(f"密码验证异常: {e}")
             return None
     
-    def login_and_get_tokens(self, email, password, device_id, user_agent=None, sec_ch_ua=None, impersonate=None, skymail_client=None):
+    def login_and_get_tokens(
+        self,
+        email,
+        password,
+        device_id,
+        user_agent=None,
+        sec_ch_ua=None,
+        impersonate=None,
+        skymail_client=None,
+        _continue_depth=0,
+    ):
         """
         完整的 OAuth 登录流程，获取 tokens
         
@@ -744,6 +961,19 @@ class OAuthClient:
         """
         self.last_error = ""
         self._log("开始 OAuth 登录流程...")
+        self.device_id = str(device_id or self.device_id or "").strip()
+        if user_agent:
+            self.ua = str(user_agent or "").strip()
+        else:
+            user_agent = self.ua or None
+        if sec_ch_ua:
+            self.sec_ch_ua = str(sec_ch_ua or "").strip()
+        else:
+            sec_ch_ua = self.sec_ch_ua or None
+        if impersonate:
+            self.impersonate = str(impersonate or "").strip()
+        else:
+            impersonate = self.impersonate or None
 
         code_verifier, code_challenge = generate_pkce()
         oauth_state = secrets.token_urlsafe(32)
@@ -801,10 +1031,13 @@ class OAuthClient:
             return None
 
         self._log(f"OAuth 状态起点: {describe_flow_state(state)}")
+        if self._state_hits_account_deactivated(state, "login_start_state"):
+            return None
         seen_states = {}
         referer = continue_referer
 
         for step in range(20):
+            self.last_state = state
             signature = self._state_signature(state)
             seen_states[signature] = seen_states.get(signature, 0) + 1
             if seen_states[signature] > 2:
@@ -861,6 +1094,49 @@ class OAuthClient:
                 continue
 
             if self._state_is_add_phone(state):
+                consent_url = self._canonical_consent_url()
+                self._log("步骤5: add_phone 命中，先尝试 canonical consent 抢救 workspace/callback")
+                code, next_state = self._oauth_submit_workspace_and_org(
+                    consent_url,
+                    device_id,
+                    user_agent,
+                    impersonate,
+                )
+                if code:
+                    self._log(f"获取到 authorization code: {code[:20]}...")
+                    self._log("步骤7: POST /oauth/token")
+                    tokens = self._exchange_code_for_tokens(code, code_verifier, user_agent, impersonate)
+                    if tokens:
+                        self._log("OAuth 登录成功")
+                    else:
+                        self._log("换取 tokens 失败")
+                    return tokens
+                if next_state:
+                    referer = state.current_url or referer
+                    state = next_state
+                    self._log(f"add_phone -> workspace state -> {describe_flow_state(state)}")
+                    continue
+
+                workspace_error = str(self.last_error or "").strip()
+                if self._is_account_deactivated_marker(workspace_error):
+                    self._set_error(ACCOUNT_DEACTIVATED_ERROR)
+                    return None
+                if _continue_depth < 1:
+                    self._log(
+                        "canonical consent 未拿到 workspace/callback，重建一次全新 OAuth session 重试"
+                        + (f": {workspace_error}" if workspace_error else "")
+                    )
+                    self._recreate_session()
+                    return self.login_and_get_tokens(
+                        email,
+                        password,
+                        device_id,
+                        user_agent=user_agent,
+                        sec_ch_ua=sec_ch_ua,
+                        impersonate=impersonate,
+                        skymail_client=skymail_client,
+                        _continue_depth=_continue_depth + 1,
+                    )
                 next_state = self._handle_add_phone_verification(
                     device_id,
                     user_agent,
@@ -995,6 +1271,8 @@ class OAuthClient:
             return None
 
         self._log(f"Passwordless OAuth 状态起点: {describe_flow_state(state)}")
+        if self._state_hits_account_deactivated(state, "passwordless_start_state"):
+            return None
         referer = state.current_url or continue_referer
         bootstrap_steps = 0
         while bootstrap_steps < 6:
@@ -1196,6 +1474,7 @@ class OAuthClient:
         if not workspace_id:
             self._set_error("workspace_id 为空")
             return None, None
+        self.last_workspace_id = str(workspace_id).strip()
         
         self._log(f"选择 workspace: {workspace_id}")
         
@@ -1224,12 +1503,16 @@ class OAuthClient:
                 kwargs["impersonate"] = impersonate
 
             self._browser_pause()
-            r = self.session.post(
+            r = self._request_with_proxy_retry(
+                "post",
                 f"{self.oauth_api_base}/api/accounts/workspace/select",
-                    **kwargs
+                retry_label="workspace/select",
+                **kwargs,
             )
             
             self._log(f"workspace/select -> {r.status_code}")
+            if self._response_hits_account_deactivated(r, "workspace/select"):
+                return None, None
             
             # 检查重定向
             if r.status_code in (301, 302, 303, 307, 308):
@@ -1287,12 +1570,16 @@ class OAuthClient:
                                 kwargs["impersonate"] = impersonate
 
                             self._browser_pause()
-                            r_org = self.session.post(
+                            r_org = self._request_with_proxy_retry(
+                                "post",
                                 f"{self.oauth_api_base}/api/accounts/organization/select",
-                                **kwargs
+                                retry_label="organization/select",
+                                **kwargs,
                             )
                             
                             self._log(f"organization/select -> {r_org.status_code}")
+                            if self._response_hits_account_deactivated(r_org, "organization/select"):
+                                return None, None
                             
                             # 检查重定向
                             if r_org.status_code in (301, 302, 303, 307, 308):
@@ -1364,7 +1651,14 @@ class OAuthClient:
             if impersonate:
                 kwargs["impersonate"] = impersonate
             self._browser_pause(0.12, 0.3)
-            r = self.session.get(consent_url, **kwargs)
+            r = self._request_with_proxy_retry(
+                "get",
+                consent_url,
+                retry_label="fetch consent html",
+                **kwargs,
+            )
+            if self._response_hits_account_deactivated(r, "fetch consent html"):
+                return ""
             if r.status_code == 200 and "text/html" in (r.headers.get("content-type", "").lower()):
                 return r.text
         except Exception:
@@ -1547,8 +1841,15 @@ class OAuthClient:
                 kwargs["impersonate"] = impersonate
 
             self._browser_pause()
-            r = self.session.post(url, **kwargs)
+            r = self._request_with_proxy_retry(
+                "post",
+                url,
+                retry_label="/oauth/token",
+                **kwargs,
+            )
             self._sync_response_cookies(r)
+            if self._response_hits_account_deactivated(r, "/oauth/token"):
+                return None
             
             if r.status_code == 200:
                 data = r.json()
@@ -1586,12 +1887,19 @@ class OAuthClient:
             if impersonate:
                 kwargs["impersonate"] = impersonate
             self._browser_pause(0.12, 0.25)
-            resp = self.session.post(request_url, **kwargs)
+            resp = self._request_with_proxy_retry(
+                "post",
+                request_url,
+                retry_label="/passwordless/send-otp",
+                **kwargs,
+            )
             self._sync_response_cookies(resp)
         except Exception as e:
             return False, None, f"passwordless/send-otp 异常: {e}"
 
         self._log(f"/passwordless/send-otp -> {resp.status_code}")
+        if self._response_hits_account_deactivated(resp, "/passwordless/send-otp"):
+            return False, None, ACCOUNT_DEACTIVATED_ERROR
         if resp.status_code != 200:
             return False, None, f"passwordless/send-otp 失败: {resp.status_code} - {resp.text[:180]}"
 
@@ -1601,6 +1909,8 @@ class OAuthClient:
             data = {}
 
         next_state = self._state_from_payload(data, current_url=str(resp.url) or request_url)
+        if self._state_hits_account_deactivated(next_state, "passwordless_send_otp_state"):
+            return False, None, ACCOUNT_DEACTIVATED_ERROR
         if not next_state.page_type:
             next_state = self._state_from_url(f"{self.oauth_issuer}/email-verification")
         self._log(f"passwordless/send-otp {describe_flow_state(next_state)}")
@@ -1625,11 +1935,18 @@ class OAuthClient:
             if impersonate:
                 kwargs["impersonate"] = impersonate
             self._browser_pause(0.12, 0.25)
-            resp = self.session.get(request_url, **kwargs)
+            resp = self._request_with_proxy_retry(
+                "get",
+                request_url,
+                retry_label="/email-otp/send",
+                **kwargs,
+            )
         except Exception as e:
             return False, f"email-otp/send 异常: {e}"
 
         self._log(f"/email-otp/send -> {resp.status_code}")
+        if self._response_hits_account_deactivated(resp, "/email-otp/send"):
+            return False, ACCOUNT_DEACTIVATED_ERROR
         if resp.status_code != 200:
             return False, f"email-otp/send 失败: {resp.status_code} - {resp.text[:180]}"
         return True, ""
@@ -1660,11 +1977,18 @@ class OAuthClient:
                 kwargs["impersonate"] = impersonate
 
             self._browser_pause(0.12, 0.25)
-            resp = self.session.post(request_url, **kwargs)
+            resp = self._request_with_proxy_retry(
+                "post",
+                request_url,
+                retry_label="/add-phone/send",
+                **kwargs,
+            )
         except Exception as e:
             return False, None, f"add-phone/send 异常: {e}"
 
         self._log(f"/add-phone/send -> {resp.status_code}")
+        if self._response_hits_account_deactivated(resp, "/add-phone/send"):
+            return False, None, ACCOUNT_DEACTIVATED_ERROR
         if resp.status_code != 200:
             return False, None, f"add-phone/send 失败: {resp.status_code} - {resp.text[:180]}"
 
@@ -1696,11 +2020,18 @@ class OAuthClient:
             if impersonate:
                 kwargs["impersonate"] = impersonate
             self._browser_pause(0.12, 0.25)
-            resp = self.session.post(request_url, **kwargs)
+            resp = self._request_with_proxy_retry(
+                "post",
+                request_url,
+                retry_label="/phone-otp/resend",
+                **kwargs,
+            )
         except Exception as e:
             return False, f"phone-otp/resend 异常: {e}"
 
         self._log(f"/phone-otp/resend -> {resp.status_code}")
+        if self._response_hits_account_deactivated(resp, "/phone-otp/resend"):
+            return False, ACCOUNT_DEACTIVATED_ERROR
         if resp.status_code == 200:
             return True, ""
         return False, f"phone-otp/resend 失败: {resp.status_code} - {resp.text[:180]}"
@@ -1730,11 +2061,18 @@ class OAuthClient:
             if impersonate:
                 kwargs["impersonate"] = impersonate
             self._browser_pause(0.12, 0.25)
-            resp = self.session.post(request_url, **kwargs)
+            resp = self._request_with_proxy_retry(
+                "post",
+                request_url,
+                retry_label="/phone-otp/validate",
+                **kwargs,
+            )
         except Exception as e:
             return False, None, f"phone-otp/validate 异常: {e}"
 
         self._log(f"/phone-otp/validate -> {resp.status_code}")
+        if self._response_hits_account_deactivated(resp, "/phone-otp/validate"):
+            return False, None, ACCOUNT_DEACTIVATED_ERROR
         if resp.status_code != 200:
             if resp.status_code == 401:
                 return False, None, "手机号验证码错误"
@@ -1812,13 +2150,20 @@ class OAuthClient:
                     kwargs["impersonate"] = impersonate
 
                 self._browser_pause(0.12, 0.25)
-                resp = self.session.post(request_url, **kwargs)
+                resp = self._request_with_proxy_retry(
+                    "post",
+                    request_url,
+                    retry_label=label,
+                    **kwargs,
+                )
                 self._sync_response_cookies(resp)
             except Exception as e:
                 self._log(f"{label} 异常: {e}")
                 continue
 
             self._log(f"/{label} -> {resp.status_code}")
+            if self._response_hits_account_deactivated(resp, label):
+                return None
             if resp.status_code == 200:
                 try:
                     data = resp.json()
@@ -1830,6 +2175,8 @@ class OAuthClient:
                     data,
                     current_url=str(resp.url) or (state.current_url or state.continue_url or request_url),
                 )
+                if self._state_hits_account_deactivated(next_state, f"{label}_state"):
+                    return None
                 self._log(f"OTP 验证通过 {describe_flow_state(next_state)}")
                 return next_state
 
@@ -1866,8 +2213,34 @@ class OAuthClient:
             skymail_client._used_codes = set()
 
         tried_codes = set(getattr(skymail_client, "_used_codes", set()))
-        otp_deadline = time.time() + 60
+        otp_deadline = time.time() + OAUTH_OTP_TOTAL_WAIT_SECONDS
         otp_sent_at = time.time()
+        empty_rounds = 0
+        resend_attempts = 0
+        max_resend_attempts = 1
+
+        def should_give_up():
+            if resend_attempts < max_resend_attempts:
+                return False
+            return (time.time() - otp_sent_at) >= OAUTH_OTP_POST_RESEND_GRACE_SECONDS
+
+        def resend_otp():
+            if passwordless:
+                return self._send_passwordless_otp(
+                    device_id,
+                    user_agent,
+                    sec_ch_ua,
+                    impersonate,
+                    referer=state.current_url or state.continue_url or f"{self.oauth_issuer}/email-verification",
+                )
+            ok, detail = self._send_email_otp(
+                device_id,
+                user_agent,
+                sec_ch_ua,
+                impersonate,
+                referer=state.current_url or state.continue_url or f"{self.oauth_issuer}/email-verification",
+            )
+            return ok, None, detail
 
         def validate_otp(code):
             tried_codes.add(code)
@@ -1890,7 +2263,7 @@ class OAuthClient:
             self._log("使用 wait_for_verification_code 进行阻塞式获取新验证码...")
             while time.time() < otp_deadline:
                 remaining = max(1, int(otp_deadline - time.time()))
-                wait_time = min(10, remaining)
+                wait_time = min(OAUTH_OTP_WAIT_SLICE_SECONDS, remaining)
                 try:
                     code = skymail_client.wait_for_verification_code(
                         email,
@@ -1903,7 +2276,29 @@ class OAuthClient:
                     code = None
 
                 if not code:
+                    empty_rounds += 1
                     self._log("暂未收到新的 OTP，继续等待...")
+                    if empty_rounds >= OAUTH_OTP_EMPTY_ROUNDS_BEFORE_RESEND:
+                        if resend_attempts < max_resend_attempts:
+                            resend_attempts += 1
+                            send_ok, resend_state, send_detail = resend_otp()
+                            if resend_state is not None:
+                                state = resend_state
+                            otp_sent_at = time.time()
+                            empty_rounds = 0
+                            if not send_ok:
+                                if send_detail == ACCOUNT_DEACTIVATED_ERROR:
+                                    self._set_error(ACCOUNT_DEACTIVATED_ERROR)
+                                    break
+                                self._set_error(send_detail or "OTP 重发失败")
+                                break
+                            self._log("未收到新码，已触发一次 OTP 重发")
+                            continue
+                        if should_give_up():
+                            self._set_error("OpenAI 未继续发送 OTP，已放弃本轮 OAuth 验证")
+                            break
+                    if self.last_error == ACCOUNT_DEACTIVATED_ERROR:
+                        break
                     if self.last_error:
                         break
                     continue
@@ -1912,6 +2307,7 @@ class OAuthClient:
                     self._log(f"跳过已尝试验证码: {code}")
                     continue
 
+                empty_rounds = 0
                 next_state = validate_otp(code)
                 if next_state:
                     return next_state
@@ -1929,12 +2325,35 @@ class OAuthClient:
                         candidate_codes.append(code)
 
                 if not candidate_codes:
-                    elapsed = int(60 - max(0, otp_deadline - time.time()))
-                    self._log(f"等待新的 OTP... ({elapsed}s/60s)")
+                    empty_rounds += 1
+                    elapsed = int(OAUTH_OTP_TOTAL_WAIT_SECONDS - max(0, otp_deadline - time.time()))
+                    self._log(f"等待新的 OTP... ({elapsed}s/{OAUTH_OTP_TOTAL_WAIT_SECONDS}s)")
+                    if empty_rounds >= OAUTH_OTP_EMPTY_ROUNDS_BEFORE_RESEND:
+                        if resend_attempts < max_resend_attempts:
+                            resend_attempts += 1
+                            send_ok, resend_state, send_detail = resend_otp()
+                            if resend_state is not None:
+                                state = resend_state
+                            otp_sent_at = time.time()
+                            empty_rounds = 0
+                            if not send_ok:
+                                if send_detail == ACCOUNT_DEACTIVATED_ERROR:
+                                    self._set_error(ACCOUNT_DEACTIVATED_ERROR)
+                                    break
+                                self._set_error(send_detail or "OTP 重发失败")
+                                break
+                            self._log("未收到新码，已触发一次 OTP 重发")
+                            continue
+                        if should_give_up():
+                            self._set_error("OpenAI 未继续发送 OTP，已放弃本轮 OAuth 验证")
+                            break
+                    if self.last_error == ACCOUNT_DEACTIVATED_ERROR:
+                        break
                     time.sleep(2)
                     continue
 
                 for otp_code in candidate_codes:
+                    empty_rounds = 0
                     next_state = validate_otp(otp_code)
                     if next_state:
                         return next_state

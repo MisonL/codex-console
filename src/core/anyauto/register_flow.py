@@ -78,6 +78,7 @@ class AnyAutoRegistrationEngine:
         self.password: Optional[str] = None
         self.session = None
         self.device_id: Optional[str] = None
+        self._last_passwordless_error: str = ""
 
     def _log(self, message: str, level: str = "info"):
         if self.callback_logger:
@@ -104,11 +105,14 @@ class AnyAutoRegistrationEngine:
     def _should_retry(message: str) -> bool:
         text = str(message or "").lower()
         non_retryable_markers = [
+            "account_deactivated",
             "registration_disallowed",
             "cannot create your account with the given information",
             "不允许继续创建账号",
             "当前出口 ip / 设备指纹 / 会话环境很可能触发风控",
             "create-account/password 阶段",
+            "openai 未继续发送 otp",
+            "已放弃本轮 oauth 验证",
         ]
         if any(marker in text for marker in non_retryable_markers):
             return False
@@ -160,6 +164,19 @@ class AnyAutoRegistrationEngine:
         )
 
     @staticmethod
+    def _is_account_deactivated_error(message: str) -> bool:
+        text = str(message or "").strip().lower()
+        return any(
+            marker in text
+            for marker in (
+                "account_deactivated",
+                "access deactivated",
+                "account deactivated",
+                "deactivated account",
+            )
+        )
+
+    @staticmethod
     def _decode_cookie_json_value(value: str) -> Dict[str, Any]:
         raw_value = str(value or "").strip()
         if not raw_value:
@@ -205,7 +222,7 @@ class AnyAutoRegistrationEngine:
     ) -> Dict[str, Any]:
         partial: Dict[str, Any] = {
             "access_token": "",
-            "refresh_token": "",
+            "refresh_token": str(getattr(chatgpt_client, "refresh_token", "") or "").strip(),
             "id_token": "",
             "session_token": "",
             "account_id": "",
@@ -268,7 +285,6 @@ class AnyAutoRegistrationEngine:
             ).strip()
 
             partial["access_token"] = access_token
-            partial["refresh_token"] = str(getattr(chatgpt_client, "refresh_token", "") or "").strip()
             partial["session_token"] = session_token
             partial["account_id"] = account_id
             partial["workspace_id"] = partial["workspace_id"] or account_id
@@ -292,6 +308,118 @@ class AnyAutoRegistrationEngine:
 
         return partial
 
+    @staticmethod
+    def _dump_cookie_text(session) -> str:
+        if session is None:
+            return ""
+
+        cookie_map: Dict[str, str] = {}
+        ordered_keys: list[str] = []
+
+        def _push(name, value):
+            key = str(name or "").strip()
+            val = str(value or "").strip()
+            if not key:
+                return
+            if key not in cookie_map:
+                ordered_keys.append(key)
+            previous = str(cookie_map.get(key) or "").strip()
+            if val or not previous:
+                cookie_map[key] = val
+
+        try:
+            for key, value in session.cookies.items():
+                _push(key, value)
+        except Exception:
+            pass
+
+        try:
+            jar = getattr(session.cookies, "jar", None)
+            if jar is not None:
+                for cookie in jar:
+                    _push(getattr(cookie, "name", ""), getattr(cookie, "value", ""))
+        except Exception:
+            pass
+
+        return "; ".join(f"{key}={cookie_map.get(key, '')}" for key in ordered_keys if key)
+
+    @staticmethod
+    def _build_continue_url(*states) -> str:
+        for state in states:
+            if state is None:
+                continue
+            continue_url = str(getattr(state, "continue_url", "") or "").strip()
+            if continue_url:
+                return continue_url
+            current_url = str(getattr(state, "current_url", "") or "").strip()
+            if current_url:
+                return current_url
+        return ""
+
+    def _build_repair_metadata(
+        self,
+        *,
+        chatgpt_client: Optional[ChatGPTClient] = None,
+        oauth_client: Optional[OAuthClient] = None,
+        state: str = "",
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        session = None
+        if oauth_client is not None and getattr(oauth_client, "session", None) is not None:
+            session = oauth_client.session
+        elif chatgpt_client is not None:
+            session = getattr(chatgpt_client, "session", None)
+
+        cookies = self._dump_cookie_text(session)
+        continue_url = self._build_continue_url(
+            getattr(oauth_client, "last_state", None) if oauth_client is not None else None,
+            getattr(chatgpt_client, "last_registration_state", None) if chatgpt_client is not None else None,
+        )
+
+        metadata = {
+            "state": str(state or "").strip(),
+            "continue_url": continue_url,
+            "cookies": cookies,
+        }
+        if extra:
+            metadata.update(dict(extra))
+        return metadata
+
+    def _build_salvage_result(
+        self,
+        *,
+        state: str,
+        chatgpt_client: ChatGPTClient,
+        oauth_client: Optional[OAuthClient] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        error_message: str = "",
+    ) -> Dict[str, Any]:
+        partial_auth = self._capture_partial_auth_result(chatgpt_client, oauth_client)
+        merged_metadata = dict(partial_auth.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(dict(metadata))
+        merged_metadata["repair_metadata"] = self._build_repair_metadata(
+            chatgpt_client=chatgpt_client,
+            oauth_client=oauth_client,
+            state=state,
+            extra=merged_metadata.get("repair_metadata"),
+        )
+        merged_metadata["result_state"] = state
+        if error_message:
+            merged_metadata["oauth_error"] = str(error_message)
+
+        return {
+            "success": True,
+            "state": state,
+            "access_token": partial_auth.get("access_token", ""),
+            "refresh_token": partial_auth.get("refresh_token", ""),
+            "id_token": partial_auth.get("id_token", ""),
+            "session_token": partial_auth.get("session_token", ""),
+            "account_id": partial_auth.get("account_id", ""),
+            "workspace_id": partial_auth.get("workspace_id", ""),
+            "metadata": merged_metadata,
+        }
+
     def _passwordless_oauth_reauth(
         self,
         chatgpt_client: ChatGPTClient,
@@ -300,6 +428,7 @@ class AnyAutoRegistrationEngine:
         oauth_config: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         self._log("检测到 add_phone，尝试 passwordless OTP 登录补全 workspace...")
+        self._last_passwordless_error = ""
         oauth_client = OAuthClient(
             config=oauth_config,
             proxy=self.proxy_url,
@@ -331,11 +460,19 @@ class AnyAutoRegistrationEngine:
                 "session_token": partial_auth.get("session_token", ""),
                 "account_id": account_id,
                 "workspace_id": workspace_id,
-                "metadata": partial_auth.get("metadata") or {},
+                "metadata": {
+                    **(partial_auth.get("metadata") or {}),
+                    "repair_metadata": self._build_repair_metadata(
+                        chatgpt_client=chatgpt_client,
+                        oauth_client=oauth_client,
+                        state="active",
+                    ),
+                },
                 "session": oauth_client.session,
             }
 
         if oauth_client.last_error:
+            self._last_passwordless_error = str(oauth_client.last_error or "").strip()
             self._log(f"Passwordless OAuth 失败: {oauth_client.last_error}")
         return None
 
@@ -430,10 +567,11 @@ class AnyAutoRegistrationEngine:
                 # 保存会话与设备
                 self.session = chatgpt_client.session
                 self.device_id = chatgpt_client.device_id
+                salvage_state = "pending_phone" if add_phone_required else "pending_about_you"
 
                 if add_phone_required or interrupted_for_reauth:
                     if interrupted_for_reauth:
-                        self._log("🔥 [CODEX] 捕获到注册中断信号，立即启动 Passwordless OAuth 接力流程...")
+                        self._log("捕获到注册中断信号，立即启动 Passwordless OAuth 接力流程...")
                     else:
                         self._log("检测到账号需要手机号验证，尝试通过 Passwordless OAuth 补全流程...")
                         
@@ -447,6 +585,7 @@ class AnyAutoRegistrationEngine:
                         self.session = pwdless.get("session") or self.session
                         return {
                             "success": True,
+                            "state": "active",
                             "access_token": pwdless.get("access_token", ""),
                             "refresh_token": pwdless.get("refresh_token", ""),
                             "id_token": pwdless.get("id_token", ""),
@@ -455,6 +594,8 @@ class AnyAutoRegistrationEngine:
                             "workspace_id": pwdless.get("workspace_id", ""),
                             "metadata": pwdless.get("metadata") or {},
                         }
+                    if self._is_account_deactivated_error(getattr(self, "_last_passwordless_error", "")):
+                        return {"success": False, "error_message": "account_deactivated"}
 
                 # 5. 复用 session 取 token
                 self._log("步骤 2/2: 复用注册会话，优先走 callback 落地 + PKCE 换码...")
@@ -473,6 +614,7 @@ class AnyAutoRegistrationEngine:
                         workspace_id = str(session_result.get("workspace_id", "") or "").strip() or account_id
                         return {
                             "success": True,
+                            "state": "active",
                             "access_token": session_result.get("access_token", ""),
                             "refresh_token": resolved_refresh_token,
                             "session_token": session_result.get("session_token", ""),
@@ -488,6 +630,29 @@ class AnyAutoRegistrationEngine:
                         }
 
                     self._log("复用会话已拿到 Access Token，但未产出 RT，转入显式 OAuth 补全流程...")
+                elif self._is_account_deactivated_error(session_result):
+                    return {"success": False, "error_message": "account_deactivated"}
+
+                preserved_refresh_token = str(getattr(chatgpt_client, "refresh_token", "") or "").strip()
+                if preserved_refresh_token:
+                    self._log("复用会话未完成 session 落地，但已捕获 RT，停止重 OAuth salvage 并保留 RT")
+                    return {
+                        "success": True,
+                        "state": "active",
+                        "access_token": str((session_result or {}).get("access_token") or ""),
+                        "refresh_token": preserved_refresh_token,
+                        "id_token": str((session_result or {}).get("id_token") or ""),
+                        "session_token": str((session_result or {}).get("session_token") or ""),
+                        "account_id": str((session_result or {}).get("account_id") or ""),
+                        "workspace_id": str((session_result or {}).get("workspace_id") or ""),
+                        "metadata": {
+                            "auth_provider": str((session_result or {}).get("auth_provider") or "captured_refresh_token"),
+                            "token_pending": True,
+                            "salvage_skipped": True,
+                            "salvage_skip_reason": "refresh_token_already_captured",
+                            "session_error": str(session_result or ""),
+                        },
+                    }
 
                 # 6. OAuth 回退
                 self._log(f"复用会话未完成 RT 产出，回退到 OAuth 登录补全流程: {session_result}")
@@ -505,7 +670,7 @@ class AnyAutoRegistrationEngine:
                         browser_mode=self.browser_mode,
                     )
                     oauth_client._log = self._log
-                    oauth_client.session = chatgpt_client.session
+                    oauth_client.apply_auth_context(chatgpt_client.export_auth_context())
 
                     tokens = oauth_client.login_and_get_tokens(
                         normalized_email,
@@ -519,6 +684,8 @@ class AnyAutoRegistrationEngine:
                     if tokens and tokens.get("access_token") and tokens.get("refresh_token"):
                         break
 
+                    if self._is_account_deactivated_error(oauth_client.last_error):
+                        return {"success": False, "error_message": "account_deactivated"}
                     if oauth_client.last_error and "add_phone" in oauth_client.last_error:
                         break
 
@@ -548,34 +715,51 @@ class AnyAutoRegistrationEngine:
                     account_id = self._extract_account_id_from_token(tokens.get("access_token", "")) or workspace_id
                     return {
                         "success": True,
+                        "state": "active",
                         "access_token": tokens.get("access_token", ""),
                         "refresh_token": tokens.get("refresh_token", ""),
                         "id_token": tokens.get("id_token", ""),
                         "account_id": account_id or ("v2_acct_" + chatgpt_client.device_id[:8]),
                         "workspace_id": workspace_id or account_id,
                         "session_token": session_cookie,
+                        "metadata": {
+                            "repair_metadata": self._build_repair_metadata(
+                                chatgpt_client=chatgpt_client,
+                                oauth_client=oauth_client,
+                                state="active",
+                            ),
+                        },
                     }
 
                 # 7. 手机号验证需求：按成功返回，但标记为待补全
                 if oauth_client and self._is_phone_required_error(oauth_client.last_error):
-                    self._log("检测到手机号验证需求，按成功返回并标记待补全")
-                    partial_auth = self._capture_partial_auth_result(chatgpt_client, oauth_client)
-                    metadata = dict(partial_auth.get("metadata") or {})
-                    metadata.update({
-                        "phone_verification_required": True,
-                        "token_pending": True,
-                        "oauth_error": oauth_client.last_error,
-                    })
-                    return {
-                        "success": True,
-                        "access_token": partial_auth.get("access_token", ""),
-                        "refresh_token": partial_auth.get("refresh_token", ""),
-                        "id_token": partial_auth.get("id_token", ""),
-                        "session_token": partial_auth.get("session_token", ""),
-                        "account_id": partial_auth.get("account_id", ""),
-                        "workspace_id": partial_auth.get("workspace_id", ""),
-                        "metadata": metadata,
-                    }
+                    self._log("检测到手机号验证需求，按待补全状态返回")
+                    return self._build_salvage_result(
+                        state="pending_phone",
+                        chatgpt_client=chatgpt_client,
+                        oauth_client=oauth_client,
+                        metadata={
+                            "phone_verification_required": True,
+                            "token_pending": True,
+                        },
+                        error_message=oauth_client.last_error,
+                    )
+
+                if oauth_client and self._is_account_deactivated_error(oauth_client.last_error):
+                    return {"success": False, "error_message": "account_deactivated"}
+
+                if add_phone_required or interrupted_for_reauth:
+                    pending_metadata = {"token_pending": True}
+                    if add_phone_required:
+                        pending_metadata["phone_verification_required"] = True
+                    self._log(f"OAuth 补全过程未完成，按 {salvage_state} 返回待修复上下文")
+                    return self._build_salvage_result(
+                        state=salvage_state,
+                        chatgpt_client=chatgpt_client,
+                        oauth_client=oauth_client,
+                        metadata=pending_metadata,
+                        error_message=getattr(oauth_client, "last_error", "") or str(session_result or ""),
+                    )
 
                 last_error = str(getattr(oauth_client, "last_error", "") or "").strip() or "获取最终 OAuth Tokens 失败"
                 return {"success": False, "error_message": f"账号已创建成功，但 {last_error}"}

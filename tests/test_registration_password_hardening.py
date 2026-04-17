@@ -218,6 +218,7 @@ def test_anyauto_register_user_sends_device_and_sentinel_headers(monkeypatch):
     client = ChatGPTClient.__new__(ChatGPTClient)
     client.AUTH = "https://auth.openai.com"
     client.session = DummySession()
+    client.proxy = None
     client.device_id = "did-456"
     client.ua = "ua"
     client.sec_ch_ua = '"Chromium";v="145"'
@@ -277,6 +278,7 @@ def test_anyauto_register_user_upgrades_generic_400_to_environment_rejection(mon
     client = ChatGPTClient.__new__(ChatGPTClient)
     client.AUTH = "https://auth.openai.com"
     client.session = DummySession()
+    client.proxy = None
     client.device_id = "did-456"
     client.ua = "ua"
     client.sec_ch_ua = '"Chromium";v="145"'

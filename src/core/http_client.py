@@ -14,7 +14,7 @@ from curl_cffi.requests import Session, Response
 
 from ..config.constants import ERROR_MESSAGES
 from ..config.settings import get_settings
-from .openai.sentinel import SentinelPOWError, build_sentinel_pow_token
+from .openai.sentinel_headers import build_sentinel_token, build_sentinel_token_async
 from .proxy_utils import build_requests_proxy_map, normalize_proxy_url
 
 
@@ -358,11 +358,24 @@ class OpenAIHTTPClient(HTTPClient):
             Sentinel token 或 None
         """
         try:
-            from .openai.sentinel_token_v2 import build_sentinel_token
             user_agent = self.default_headers.get("User-Agent", "")
             return build_sentinel_token(self.session, did, flow="authorize_continue", user_agent=user_agent)
         except Exception as e:
             logger.error(f"Sentinel 检查异常: {e}")
+            return None
+
+    async def check_sentinel_async(self, did: str, proxies: Optional[Dict] = None) -> Optional[str]:
+        """异步检查 Sentinel 拦截，避免在事件循环线程内执行阻塞 PoW。"""
+        try:
+            user_agent = self.default_headers.get("User-Agent", "")
+            return await build_sentinel_token_async(
+                self.session,
+                did,
+                flow="authorize_continue",
+                user_agent=user_agent,
+            )
+        except Exception as e:
+            logger.error(f"Sentinel 异步检查异常: {e}")
             return None
 
 

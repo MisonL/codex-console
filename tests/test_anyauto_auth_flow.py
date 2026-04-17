@@ -1,5 +1,8 @@
+from src.core.anyauto import chatgpt_client as chatgpt_client_module
+from src.core.anyauto import oauth_client as oauth_client_module
 from src.core.anyauto.chatgpt_client import ChatGPTClient
 from src.core.anyauto.oauth_client import OAuthClient
+from src.core.anyauto.register_flow import AnyAutoRegistrationEngine
 from src.core.anyauto.utils import FlowState
 
 
@@ -184,6 +187,14 @@ def test_login_passwordless_uses_passwordless_send_otp(monkeypatch):
 def test_oauth_client_apply_auth_context_reuses_session():
     source_client = _build_chatgpt_client()
     source_client.session.cookies.set("login_session", "login-1", domain="auth.openai.com")
+    source_client.last_code_verifier = "verifier-1"
+    source_client.last_oauth_client_id = "app-test"
+    source_client.last_oauth_redirect_uri = "http://localhost:1455/auth/callback"
+    source_client.last_oauth_state = "state-1"
+    source_client.last_registration_state = FlowState(
+        page_type="about_you",
+        continue_url="https://auth.openai.com/about-you",
+    )
 
     client = OAuthClient(
         config={
@@ -198,6 +209,72 @@ def test_oauth_client_apply_auth_context_reuses_session():
 
     assert client.session is source_client.session
     assert client.session.cookies.get("login_session") == "login-1"
+    assert client.session.cookies.get("oai-did") == "did-1"
+    assert client.device_id == "did-1"
+    assert client.ua == "Mozilla/5.0"
+    assert client.sec_ch_ua == '"Chromium";v="136"'
+    assert client.impersonate == "chrome136"
+    assert client.last_code_verifier == "verifier-1"
+    assert client.last_oauth_client_id == "app-test"
+    assert client.last_oauth_redirect_uri == "http://localhost:1455/auth/callback"
+    assert client.last_oauth_state == "state-1"
+    assert client.last_state.page_type == "about_you"
+
+
+def test_login_and_get_tokens_tries_canonical_consent_after_add_phone(monkeypatch):
+    client = OAuthClient(
+        config={
+            "oauth_issuer": "https://auth.openai.com",
+            "oauth_client_id": "app_test",
+            "oauth_redirect_uri": "http://localhost:1455/auth/callback",
+        },
+        verbose=False,
+    )
+    client._log = lambda *args, **kwargs: None
+
+    consent_attempts = []
+
+    monkeypatch.setattr(
+        client,
+        "_bootstrap_oauth_session",
+        lambda *args, **kwargs: "https://auth.openai.com/log-in",
+    )
+    monkeypatch.setattr(
+        client,
+        "_submit_authorize_continue",
+        lambda *args, **kwargs: FlowState(
+            page_type="add_phone",
+            current_url="https://auth.openai.com/add-phone",
+            continue_url="https://auth.openai.com/add-phone",
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "_oauth_submit_workspace_and_org",
+        lambda consent_url, *_args, **_kwargs: consent_attempts.append(consent_url) or ("code-1", None),
+    )
+    monkeypatch.setattr(
+        client,
+        "_exchange_code_for_tokens",
+        lambda *args, **kwargs: {
+            "access_token": "at-1",
+            "refresh_token": "oaistb_rt_test_1",
+            "id_token": "id-1",
+        },
+    )
+
+    result = client.login_and_get_tokens(
+        "tester@example.com",
+        "Pwd!123456",
+        "did-1",
+        "Mozilla/5.0",
+        '"Chromium";v="136"',
+        "chrome136",
+        skymail_client=object(),
+    )
+
+    assert result["refresh_token"] == "oaistb_rt_test_1"
+    assert consent_attempts == ["https://auth.openai.com/sign-in-with-chatgpt/codex/consent"]
 
 
 def test_authorize_continue_retries_invalid_state(monkeypatch):
@@ -321,6 +398,69 @@ def test_passwordless_otp_prefers_passwordless_verify_endpoint():
     assert client.session.urls[0].endswith("/api/accounts/passwordless/verify-otp")
 
 
+def test_verify_email_otp_sends_email_otp_sentinel_header(monkeypatch):
+    client = _build_chatgpt_client()
+    client.session = DummySession(
+        DummyResponse(
+            "https://auth.openai.com/api/accounts/email-otp/validate",
+            payload={"page": {"type": "about_you"}},
+        )
+    )
+
+    monkeypatch.setattr(
+        chatgpt_client_module,
+        "build_sentinel_token",
+        lambda *args, **kwargs: "sentinel-email-otp",
+    )
+    monkeypatch.setattr(
+        chatgpt_client_module,
+        "generate_datadog_trace",
+        lambda: {"x-trace-id": "trace-1"},
+    )
+
+    success, _message = client.verify_email_otp("123456")
+
+    assert success is True
+    _url, kwargs = client.session.posts[0]
+    assert kwargs["headers"]["OpenAI-Sentinel-Token"] == "sentinel-email-otp"
+    assert kwargs["headers"]["x-trace-id"] == "trace-1"
+
+
+def test_verify_email_otp_continues_without_sentinel_when_generation_fails(monkeypatch):
+    client = _build_chatgpt_client()
+    client.session = DummySession(
+        DummyResponse(
+            "https://auth.openai.com/api/accounts/email-otp/validate",
+            payload={"page": {"type": "about_you"}},
+        )
+    )
+    logs = []
+    client._log = lambda message, level="info": logs.append((level, message))
+
+    monkeypatch.setattr(
+        chatgpt_client_module,
+        "build_sentinel_token",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("pow boom")),
+    )
+    monkeypatch.setattr(
+        client,
+        "_fetch_browser_sentinel_artifacts",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("browser boom")),
+    )
+    monkeypatch.setattr(
+        chatgpt_client_module,
+        "generate_datadog_trace",
+        lambda: {"x-trace-id": "trace-1"},
+    )
+
+    success, _message = client.verify_email_otp("123456")
+
+    assert success is True
+    _url, kwargs = client.session.posts[0]
+    assert "OpenAI-Sentinel-Token" not in kwargs["headers"]
+    assert any("继续使用标准请求头" in message for _level, message in logs)
+
+
 def test_reuse_session_uses_captured_callback_for_manual_exchange(monkeypatch):
     client = _build_chatgpt_client()
     client.last_registration_state = FlowState(
@@ -424,3 +564,198 @@ def test_follow_flow_state_stops_before_oauth_callback():
     assert state.current_url == "https://chatgpt.com/api/auth/callback/openai?code=code-1&state=state-1"
     assert client.last_follow_callback_url == state.current_url
     assert requests == [("https://auth.openai.com/continue", False)]
+
+
+def test_reuse_session_preserves_rt_when_callback_follow_fails(monkeypatch):
+    client = _build_chatgpt_client()
+    client.last_registration_state = FlowState(
+        page_type="external_url",
+        continue_url="https://auth.openai.com/continue",
+        current_url="https://auth.openai.com/continue",
+    )
+    client.last_code_verifier = "verifier-1"
+    client.last_oauth_client_id = "app_test"
+    client.last_oauth_redirect_uri = "https://chatgpt.com/api/auth/callback/openai"
+
+    events = []
+
+    def fake_follow(state, referer=None, stop_before_callback=False, max_hops=16):
+        events.append(("follow", stop_before_callback))
+        client.last_follow_callback_url = (
+            "https://chatgpt.com/api/auth/callback/openai?code=code-1&state=state-1"
+        )
+        return False, "callback landing failed"
+
+    client._follow_flow_state = fake_follow
+    client._finalize_nextauth_callback = (
+        lambda callback_url, referer=None: events.append(("finalize", callback_url, referer)) or False
+    )
+    client.get_next_auth_session_token = lambda: ""
+
+    class FakeOAuthClient:
+        def __init__(self, *args, **kwargs):
+            self.session = None
+
+        def apply_auth_context(self, context):
+            self.session = context.get("session")
+            return self.session
+
+        def _exchange_code_for_tokens(self, code, code_verifier, user_agent, impersonate):
+            events.append(("exchange", code, code_verifier))
+            return {
+                "access_token": "at-1",
+                "refresh_token": "oaistb_rt_manual_2",
+                "id_token": "id-1",
+            }
+
+    monkeypatch.setattr("src.core.anyauto.oauth_client.OAuthClient", FakeOAuthClient)
+
+    success, data = client.reuse_session_and_get_tokens()
+
+    assert success is True
+    assert data["refresh_token"] == "oaistb_rt_manual_2"
+    assert data["auth_provider"] == "oauth_token_exchange"
+    assert events == [
+        ("follow", True),
+        (
+            "finalize",
+            "https://chatgpt.com/api/auth/callback/openai?code=code-1&state=state-1",
+            "https://chatgpt.com/auth/login",
+        ),
+        ("exchange", "code-1", "verifier-1"),
+    ]
+
+
+def test_login_and_get_tokens_breaks_on_account_deactivated_before_recursive_retry(monkeypatch):
+    client = OAuthClient(
+        config={
+            "oauth_issuer": "https://auth.openai.com",
+            "oauth_client_id": "app_test",
+            "oauth_redirect_uri": "http://localhost:1455/auth/callback",
+        },
+        verbose=False,
+    )
+    client._log = lambda *args, **kwargs: None
+
+    monkeypatch.setattr(
+        client,
+        "_bootstrap_oauth_session",
+        lambda *args, **kwargs: "https://auth.openai.com/log-in",
+    )
+    monkeypatch.setattr(
+        client,
+        "_submit_authorize_continue",
+        lambda *args, **kwargs: FlowState(
+            page_type="add_phone",
+            current_url="https://auth.openai.com/add-phone",
+            continue_url="https://auth.openai.com/add-phone",
+        ),
+    )
+
+    def fake_workspace(*args, **kwargs):
+        client.last_error = oauth_client_module.ACCOUNT_DEACTIVATED_ERROR
+        return None, None
+
+    monkeypatch.setattr(client, "_oauth_submit_workspace_and_org", fake_workspace)
+    monkeypatch.setattr(
+        client,
+        "_recreate_session",
+        lambda: (_ for _ in ()).throw(AssertionError("should not recreate session")),
+    )
+
+    result = client.login_and_get_tokens(
+        "tester@example.com",
+        "Pwd!123456",
+        "did-1",
+        "Mozilla/5.0",
+        '"Chromium";v="136"',
+        "chrome136",
+        skymail_client=object(),
+    )
+
+    assert result is None
+    assert client.last_error == oauth_client_module.ACCOUNT_DEACTIVATED_ERROR
+
+
+def test_handle_otp_verification_gives_up_when_openai_stops_sending_codes(monkeypatch):
+    client = OAuthClient(
+        config={
+            "oauth_issuer": "https://auth.openai.com",
+            "oauth_client_id": "app_test",
+            "oauth_redirect_uri": "http://localhost:1455/auth/callback",
+        },
+        verbose=False,
+    )
+    client._log = lambda *args, **kwargs: None
+
+    fake_now = {"value": 1000.0}
+
+    def fake_time():
+        return fake_now["value"]
+
+    def fake_sleep(seconds):
+        fake_now["value"] += seconds
+
+    monkeypatch.setattr(oauth_client_module.time, "time", fake_time)
+    monkeypatch.setattr(oauth_client_module.time, "sleep", fake_sleep)
+    monkeypatch.setattr(client, "_send_email_otp", lambda *args, **kwargs: (True, ""))
+
+    class Mailbox:
+        def __init__(self):
+            self._used_codes = set()
+            self.calls = []
+
+        def wait_for_verification_code(self, *_args, timeout=0, **_kwargs):
+            self.calls.append(timeout)
+            fake_now["value"] += timeout
+            return None
+
+    mailbox = Mailbox()
+
+    next_state = client._handle_otp_verification(
+        "tester@example.com",
+        "did-1",
+        "Mozilla/5.0",
+        '"Chromium";v="136"',
+        "chrome136",
+        mailbox,
+        FlowState(
+            page_type="email_otp_verification",
+            current_url="https://auth.openai.com/email-verification",
+        ),
+    )
+
+    assert next_state is None
+    assert client.last_error == "OpenAI 未继续发送 OTP，已放弃本轮 OAuth 验证"
+    assert len(mailbox.calls) <= 4
+
+
+def test_request_with_proxy_retry_retries_proxy_resolution_errors(monkeypatch):
+    client = OAuthClient(
+        config={
+            "oauth_issuer": "https://auth.openai.com",
+            "oauth_client_id": "app_test",
+            "oauth_redirect_uri": "http://localhost:1455/auth/callback",
+        },
+        proxy="http://proxy.example:8080",
+        verbose=False,
+    )
+    client._log = lambda *args, **kwargs: None
+    monkeypatch.setattr(oauth_client_module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    class RetrySession:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("Temporary failure in name resolution")
+            return "ok"
+
+    client.session = RetrySession()
+
+    result = client._request_with_proxy_retry("get", "https://chatgpt.com/api/auth/session")
+
+    assert result == "ok"
+    assert client.session.calls == 3

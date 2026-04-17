@@ -100,6 +100,13 @@ class AccessTokenOnlyRegistrationEngine:
     @staticmethod
     def _should_retry(message: str) -> bool:
         text = str(message or "").lower()
+        non_retryable_markers = [
+            "account_deactivated",
+            "openai 未继续发送 otp",
+            "已放弃本轮 oauth 验证",
+        ]
+        if any(marker in text for marker in non_retryable_markers):
+            return False
         retriable_markers = [
             "tls",
             "ssl",

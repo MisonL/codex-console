@@ -49,11 +49,11 @@ Result:
 - Dev database only: copied 4 abnormal accounts `53 / 64 / 65 / 71`
 - Batch audit result: `1 repairable`, `3 blocked by add-phone`
 - Batch repair result: account `53` repaired successfully; `64 / 65 / 71` stayed blocked
-- Batch export result: ZIP only contained the repaired account artifact
+- Batch export result: ZIP only contained the repaired account artifact (交付产物)
 
 ## Local CodeRabbit
 
 - First pass: found actionable issues around domain slot release, pause timeout, DB rollback, long-held DB session, mailbox binding, and review doc secret exposure
 - Fix status: all findings addressed on branch
-- Second pass result: `0 comments`
+- Second pass result: `no comments`
 - Reviewed repository path: `/Volumes/Work/code/codex-console`

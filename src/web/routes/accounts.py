@@ -600,7 +600,7 @@ def _run_batch_codex_auth_repair_async(task_id: str, request_data: Dict[str, Any
                             {
                                 "success": True,
                                 "health": CODEX_AUTH_HEALTHY,
-                                "reason": "账号已完整，已补生成 artifact",
+                                "reason": "账号已完整，已补生成 artifact (交付产物)",
                                 "artifact_path": str(artifact_path),
                             }
                         )

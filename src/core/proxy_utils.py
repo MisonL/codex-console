@@ -138,16 +138,24 @@ def is_retryable_proxy_probe(status_code: Optional[int], error_message: Optional
 
     text = str(error_message or "").strip().lower()
     retry_markers = (
+        "getaddrinfo",
         "timed out",
         "timeout",
         "temporarily unavailable",
         "connection reset",
         "connection aborted",
         "connection refused",
+        "connection reset by peer",
         "tlsv1 alert internal error",
         "recv failure",
         "network is unreachable",
         "could not resolve host",
+        "could not resolve proxy",
+        "failed to resolve proxy",
+        "failed to resolve host",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "nodename nor servname provided",
     )
     return any(marker in text for marker in retry_markers)
 

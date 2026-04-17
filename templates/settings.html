@@ -28,14 +28,14 @@
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/card-pool" class="nav-link">卡池</a>
-                <a href="/auto-team" class="nav-link">team</a>
+                <a href="/auto-team" class="nav-link">Team 管理</a>
                 <a href="/logs" class="nav-link">后台日志</a>
                 <a href="/settings" class="nav-link active">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
-            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">系统自检</a>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">切换主题</button>
         </div>
         </nav>
 
@@ -130,7 +130,7 @@
                                     <tr>
                                         <td colspan="8">
                                             <div class="empty-state">
-                                                <div class="empty-state-icon">Proxy</div>
+                                                <div class="empty-state-icon">代理配置</div>
                                                 <div class="empty-state-title">暂无代理</div>
                                                 <div class="empty-state-description">点击"添加代理"按钮添加代理服务器</div>
                                             </div>
@@ -193,7 +193,7 @@
                                     <tr>
                                         <td colspan="7">
                                             <div class="empty-state">
-                                                <div class="empty-state-icon">Mail</div>
+                                                <div class="empty-state-icon">邮箱配置</div>
                                                 <div class="empty-state-title">暂无邮箱服务</div>
                                                 <div class="empty-state-description">点击"添加服务"创建邮箱服务</div>
                                             </div>
@@ -358,7 +358,7 @@ user:pass@127.0.0.1:7890
                                 <thead>
                                     <tr>
                                         <th style="width:150px;">名称</th>
-                                        <th>API URL</th>
+                                        <th>API 地址</th>
                                         <th style="width:180px;">代理地址</th>
                                         <th style="width:80px;">状态</th>
                                         <th style="width:60px;text-align:center;">优先级</th>
@@ -385,7 +385,7 @@ user:pass@127.0.0.1:7890
                                 <thead>
                                     <tr>
                                         <th style="width:150px;">名称</th>
-                                        <th>API URL</th>
+                                        <th>API 地址</th>
                                         <th style="width:120px;">目标类型</th>
                                         <th style="width:80px;">状态</th>
                                         <th style="width:60px;text-align:center;">优先级</th>
@@ -412,7 +412,7 @@ user:pass@127.0.0.1:7890
                                 <thead>
                                     <tr>
                                         <th style="width:150px;">名称</th>
-                                        <th>API URL</th>
+                                        <th>API 地址</th>
                                         <th style="width:80px;">状态</th>
                                         <th style="width:60px;text-align:center;">优先级</th>
                                         <th style="width:220px;">操作</th>
@@ -437,7 +437,7 @@ user:pass@127.0.0.1:7890
                                 <thead>
                                     <tr>
                                         <th style="width:150px;">名称</th>
-                                        <th>API URL / 用户名</th>
+                                        <th>API 地址 / 用户名</th>
                                         <th style="width:80px;">状态</th>
                                         <th style="width:60px;text-align:center;">优先级</th>
                                         <th style="width:220px;">操作</th>
@@ -467,11 +467,11 @@ user:pass@127.0.0.1:7890
                                 <input type="text" id="tm-service-name" placeholder="例如: 主服务" required>
                             </div>
                             <div class="form-group">
-                                <label for="tm-service-url">API URL *</label>
+                                <label for="tm-service-url">API 地址 *</label>
                                 <input type="text" id="tm-service-url" placeholder="https://tm.example.com" required>
                             </div>
                             <div class="form-group">
-                                <label for="tm-service-key">API Key</label>
+                                <label for="tm-service-key">API 密钥</label>
                                 <input type="password" id="tm-service-key" placeholder="编辑时留空则保持原值" autocomplete="new-password">
                             </div>
                             <div class="form-row">
@@ -511,7 +511,7 @@ user:pass@127.0.0.1:7890
                                 <input type="text" id="new-api-service-name" placeholder="例如: 主服务" required>
                             </div>
                             <div class="form-group">
-                                <label for="new-api-service-url">API URL *</label>
+                                <label for="new-api-service-url">API 地址 *</label>
                                 <input type="text" id="new-api-service-url" placeholder="https://newapi.example.com" required>
                             </div>
                             <div class="form-group">
@@ -560,11 +560,11 @@ user:pass@127.0.0.1:7890
                                 <input type="text" id="sub2api-service-name" placeholder="例如: 主服务" required>
                             </div>
                             <div class="form-group">
-                                <label for="sub2api-service-url">API URL *</label>
+                                <label for="sub2api-service-url">API 地址 *</label>
                                 <input type="text" id="sub2api-service-url" placeholder="http://host" required>
                             </div>
                             <div class="form-group">
-                                <label for="sub2api-service-key">API Key</label>
+                                <label for="sub2api-service-key">API 密钥</label>
                                 <input type="password" id="sub2api-service-key" placeholder="编辑时留空则保持原值" autocomplete="new-password">
                             </div>
                             <div class="form-group">
@@ -612,12 +612,12 @@ user:pass@127.0.0.1:7890
                                 <input type="text" id="cpa-service-name" placeholder="例如: 主服务" required>
                             </div>
                             <div class="form-group">
-                                <label for="cpa-service-url">API URL *</label>
+                                <label for="cpa-service-url">API 地址 *</label>
                                 <input type="text" id="cpa-service-url" placeholder="https://cpa.example.com" required>
                                 <p class="hint">支持填写根地址、`/v0/management` 或完整的 `/v0/management/auth-files` 地址</p>
                             </div>
                             <div class="form-group">
-                                <label for="cpa-service-token">API Token</label>
+                                <label for="cpa-service-token">API 令牌</label>
                                 <input type="password" id="cpa-service-token" placeholder="编辑时留空则保持原值" autocomplete="new-password">
                             </div>
                             <div class="form-group">

@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  webui-feat:
+    build: .
+    container_name: codex-console-feat
+    shm_size: "1gb"
+    ports:
+      - "16671:1455"
+      - "6081:6080"
+    environment:
+      - WEBUI_HOST=0.0.0.0
+      - WEBUI_PORT=1455
+      - DISPLAY=:99
+      - ENABLE_VNC=1
+      - VNC_PORT=5900
+      - NOVNC_PORT=6080
+      - DEBUG=1
+      - LOG_LEVEL=debug
+      - WEBUI_ACCESS_PASSWORD=admin123
+    volumes:
+      # 使用独立的开发数据目录，避免污染生产数据库
+      - ./data-feat:/app/data
+      - ./logs-feat:/app/logs
+    restart: unless-stopped

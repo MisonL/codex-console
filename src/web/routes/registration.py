@@ -1864,42 +1864,54 @@ async def _start_batch_registration_internal(
 
     batch_id = str(uuid.uuid4())
     task_uuids = [str(uuid.uuid4()) for _ in range(request.count)]
-    tasks = await run_db_call(
-        _create_registration_tasks_in_db,
-        [
-            {
-                "task_uuid": task_uuid,
-                "proxy": request.proxy,
-            }
-            for task_uuid in task_uuids
-        ],
-    )
+    
+    try:
+        logger.info(f"正在为批量任务 {batch_id} 创建 {len(task_uuids)} 个数据库条目...")
+        tasks = await run_db_call(
+            _create_registration_tasks_in_db,
+            [
+                {
+                    "task_uuid": task_uuid,
+                    "proxy": request.proxy,
+                    "email_service_id": request.email_service_id,
+                }
+                for task_uuid in task_uuids
+            ],
+        )
+    except Exception as e:
+        logger.error(f"批量任务数据库初始化失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"数据库写入失败: {str(e)}")
 
-    _schedule_async_job(
-        background_tasks,
-        run_batch_registration,
-        batch_id,
-        task_uuids,
-        request.email_service_type,
-        request.proxy,
-        request.email_service_config,
-        request.email_service_id,
-        request.interval_min,
-        request.interval_max,
-        request.concurrency,
-        request.mode,
-        _current_wait_strategy(),
-        request.auto_upload_cpa,
-        request.cpa_service_ids,
-        request.auto_upload_sub2api,
-        request.sub2api_service_ids,
-        request.auto_upload_tm,
-        request.tm_service_ids,
-        request.auto_upload_new_api,
-        request.new_api_service_ids,
-        request.registration_type,
-        request.refresh_token_enabled,
-    )
+    try:
+        logger.info(f"正在调度批量注册后台任务: {batch_id}")
+        _schedule_async_job(
+            background_tasks,
+            run_batch_registration,
+            batch_id,
+            task_uuids,
+            request.email_service_type,
+            request.proxy,
+            request.email_service_config,
+            request.email_service_id,
+            request.interval_min,
+            request.interval_max,
+            request.concurrency,
+            request.mode,
+            _current_wait_strategy(),
+            request.auto_upload_cpa,
+            request.cpa_service_ids,
+            request.auto_upload_sub2api,
+            request.sub2api_service_ids,
+            request.auto_upload_tm,
+            request.tm_service_ids,
+            request.auto_upload_new_api,
+            request.new_api_service_ids,
+            request.registration_type,
+            request.refresh_token_enabled,
+        )
+    except Exception as e:
+        logger.error(f"批量任务后台调度失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"后台任务调度失败: {str(e)}")
 
     return BatchRegistrationResponse(
         batch_id=batch_id,

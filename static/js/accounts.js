@@ -1370,7 +1370,7 @@ function openCodexAuthModal(action) {
     generate: {
       title: "Codex Auth 批量生成",
       action: "批量生成",
-      purpose: "为已有完整 Managed Auth 账号生成标准 auth.json artifact。",
+      purpose: "为已有完整 Managed Auth 账号生成标准 auth.json artifact (交付产物)。",
       flow: "只处理 refresh_token、id_token、account_id 完整的账号；缺字段账号会直接失败，不会触发登录。",
       note: "生成成功后可直接导出给官方 Codex 或 codex-auth 使用。",
       confirmText: "开始生成",
