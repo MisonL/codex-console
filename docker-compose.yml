@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   webui:
     build: .
@@ -17,7 +15,7 @@ services:
       - NOVNC_PORT=6080
       - DEBUG=0
       - LOG_LEVEL=info
-      - WEBUI_ACCESS_PASSWORD=admin123
+      - WEBUI_ACCESS_PASSWORD=${WEBUI_ACCESS_PASSWORD:?set WEBUI_ACCESS_PASSWORD before docker compose up}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

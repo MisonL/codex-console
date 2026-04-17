@@ -1,0 +1,4 @@
+[submodule "any-auto-register-clone"]
+	path = any-auto-register-clone
+	url = https://github.com/MisonL/any-auto-register.git
+

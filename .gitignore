@@ -39,6 +39,7 @@ data/
 data-dev/
 logs/
 logs-dev/
+logs-feat/
 *.db
 *.sqlite
 *.sqlite3
