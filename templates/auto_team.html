@@ -26,7 +26,7 @@
             font-size: 0.875rem;
             font-weight: 500;
             cursor: pointer;
-            transition: all var(--transition);
+            transition: color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
             min-height: var(--control-height);
         }
 
@@ -482,7 +482,7 @@
             align-items: center;
             justify-content: center;
             cursor: pointer;
-            transition: all var(--transition);
+            transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
             font-size: 0.98rem;
             line-height: 1;
         }
@@ -541,7 +541,6 @@
             position: fixed;
             inset: 0;
             background: rgba(15, 23, 42, 0.42);
-            backdrop-filter: blur(2px);
             z-index: 1200;
             align-items: center;
             justify-content: center;
@@ -600,7 +599,7 @@
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            transition: all var(--transition);
+            transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
         }
 
         .target-modal-close:hover {
@@ -764,7 +763,7 @@
             font-size: 0.95rem;
             padding: 10px 12px;
             cursor: pointer;
-            transition: all var(--transition);
+            transition: color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
         }
 
         .team-import-tab-btn.active {
@@ -851,8 +850,8 @@
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">⚙️</a>
-            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">🌙</button>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
         </div>
         </nav>
 
@@ -1128,7 +1127,7 @@
                     </div>
                     <div class="form-group">
                         <label for="teamImportRefreshToken">Refresh Token (RT)</label>
-                        <input id="teamImportRefreshToken" class="form-input" type="text" placeholder="rt-...">
+                        <input id="teamImportRefreshToken" class="form-input" type="text" placeholder="oaistb_rt...">
                         <div class="team-import-hint">可选，用于自动刷新 AT</div>
                     </div>
                     <div class="form-group">
@@ -1176,7 +1175,5 @@
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
-
 
 

@@ -7,19 +7,37 @@ import json
 import logging
 import re
 import threading
+import time
+import uuid
 import zipfile
 import base64
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Body
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import String, cast, func
 
 from ...config.constants import AccountStatus
 from ...config.settings import get_settings
+from ...core.openai.codex_auth_workbench import (
+    CODEX_AUTH_EXTRA_KEY,
+    CODEX_AUTH_BLOCKED,
+    CODEX_AUTH_HEALTHY,
+    CODEX_AUTH_MISSING,
+    CODEX_AUTH_REPAIRABLE,
+    CodexAuthEngine,
+    build_codex_auth_zip_entries,
+    build_managed_auth_json,
+    persist_codex_auth_generated_artifact,
+    persist_codex_auth_audit,
+    persist_codex_auth_success,
+    resolve_codex_auth_status,
+    resolve_email_service_for_account,
+    update_codex_auth_extra,
+)
 from ...core.openai.overview import fetch_codex_overview, AccountDeactivatedError
 from ...core.openai.token_refresh import refresh_account_token as do_refresh
 from ...core.openai.token_refresh import validate_account_token as do_validate
@@ -31,7 +49,7 @@ from ...core.upload.new_api_upload import batch_upload_to_new_api, upload_to_new
 from ...core.dynamic_proxy import get_proxy_url_for_task
 from ...core.timezone_utils import utcnow_naive
 from ...database import crud
-from ...database.models import Account
+from ...database.models import Account, EmailService
 from ...database.session import get_db
 from ..task_manager import task_manager
 
@@ -50,6 +68,995 @@ INVALID_ACCOUNT_STATUSES = (
 )
 
 _QUICK_REFRESH_WORKFLOW_LOCK = threading.Lock()
+_ACCOUNT_TASK_POLL_INTERVAL_SECONDS = 0.25
+
+
+def _account_task_id(task_type: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(task_type or "").strip().lower()).strip("-") or "task"
+    return f"accounts-{normalized}-{uuid.uuid4().hex[:12]}"
+
+
+def _get_account_task_or_404(task_id: str) -> Dict[str, Any]:
+    snapshot = task_manager.get_domain_task("accounts", task_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return snapshot
+
+
+def _wait_account_task_if_paused(task_id: str) -> bool:
+    while True:
+        snapshot = task_manager.get_domain_task("accounts", task_id) or {}
+        if bool(snapshot.get("cancel_requested")):
+            return False
+        if not bool(snapshot.get("pause_requested")):
+            return True
+        task_manager.update_domain_task(
+            "accounts",
+            task_id,
+            status="paused",
+            paused=True,
+            message="任务已暂停，等待继续",
+        )
+        time.sleep(_ACCOUNT_TASK_POLL_INTERVAL_SECONDS)
+
+
+def _finalize_account_async_task(
+    task_id: str,
+    *,
+    status: str,
+    message: str,
+    result: Dict[str, Any],
+    error: Optional[str] = None,
+) -> None:
+    task_manager.update_domain_task(
+        "accounts",
+        task_id,
+        status=status,
+        paused=False,
+        pause_requested=False,
+        finished_at=datetime.utcnow().isoformat(),
+        message=message,
+        error=error,
+        result=result,
+    )
+    task_manager.release_domain_slot("accounts", task_id)
+
+
+def _submit_account_async_task(task_id: str, runner, payload: Dict[str, Any]) -> None:
+    try:
+        task_manager.executor.submit(runner, task_id, payload)
+    except Exception as exc:
+        logger.exception("提交 accounts 异步任务失败: task_id=%s error=%s", task_id, exc)
+        task_manager.update_domain_task(
+            "accounts",
+            task_id,
+            status="failed",
+            finished_at=datetime.utcnow().isoformat(),
+            message=f"任务提交失败: {exc}",
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail="任务提交失败") from exc
+
+
+def _codex_auth_task_id(task_type: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(task_type or "").strip().lower()).strip("-") or "task"
+    return f"codex-auth-{normalized}-{uuid.uuid4().hex[:12]}"
+
+
+def _get_codex_auth_task_or_404(task_id: str) -> Dict[str, Any]:
+    snapshot = task_manager.get_domain_task("codex_auth", task_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return snapshot
+
+
+def _wait_codex_auth_task_if_paused(task_id: str) -> bool:
+    while True:
+        snapshot = task_manager.get_domain_task("codex_auth", task_id) or {}
+        if bool(snapshot.get("cancel_requested")):
+            return False
+        if not bool(snapshot.get("pause_requested")):
+            return True
+        task_manager.update_domain_task(
+            "codex_auth",
+            task_id,
+            status="paused",
+            paused=True,
+            message="Codex Auth 任务已暂停，等待继续",
+        )
+        time.sleep(_ACCOUNT_TASK_POLL_INTERVAL_SECONDS)
+
+
+def _finalize_codex_auth_async_task(
+    task_id: str,
+    *,
+    status: str,
+    message: str,
+    result: Dict[str, Any],
+    error: Optional[str] = None,
+) -> None:
+    task_manager.update_domain_task(
+        "codex_auth",
+        task_id,
+        status=status,
+        paused=False,
+        pause_requested=False,
+        finished_at=datetime.utcnow().isoformat(),
+        message=message,
+        error=error,
+        result=result,
+    )
+    task_manager.release_domain_slot("codex_auth", task_id)
+
+
+def _submit_codex_auth_async_task(task_id: str, runner, payload: Dict[str, Any]) -> None:
+    try:
+        task_manager.executor.submit(runner, task_id, payload)
+    except Exception as exc:
+        logger.exception("提交 codex_auth 异步任务失败: task_id=%s error=%s", task_id, exc)
+        task_manager.update_domain_task(
+            "codex_auth",
+            task_id,
+            status="failed",
+            finished_at=datetime.utcnow().isoformat(),
+            message=f"任务提交失败: {exc}",
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail="任务提交失败") from exc
+
+
+def _resolve_codex_auth_accounts(
+    db,
+    *,
+    ids: List[int],
+    select_all: bool,
+    status_filter: Optional[str],
+    email_service_filter: Optional[str],
+    search_filter: Optional[str],
+) -> List[Account]:
+    resolved_ids = resolve_account_ids(
+        db,
+        ids,
+        select_all,
+        status_filter,
+        email_service_filter,
+        search_filter,
+    )
+    if not resolved_ids:
+        return []
+    return db.query(Account).filter(Account.id.in_(resolved_ids)).order_by(Account.created_at.desc()).all()
+
+
+def _resolve_codex_auth_proxy(account: Account, request_proxy: Optional[str]) -> Optional[str]:
+    if str(request_proxy or "").strip():
+        return _get_proxy(request_proxy)
+    return _get_proxy(str(account.proxy_used or "").strip() or None)
+
+
+def _run_codex_auth_online_probe(
+    db,
+    account: Account,
+    *,
+    request_proxy: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    status = resolve_codex_auth_status(account)
+    if status.complete:
+        persist_codex_auth_audit(account, health=CODEX_AUTH_HEALTHY)
+        db.commit()
+        return (
+            {
+                "id": account.id,
+                "email": account.email,
+                "success": True,
+                "health": CODEX_AUTH_HEALTHY,
+                "label": status.label,
+                "reason": status.reason,
+                "action": "static",
+            },
+            "",
+        )
+
+    if status.health not in {CODEX_AUTH_REPAIRABLE, CODEX_AUTH_BLOCKED}:
+        persist_codex_auth_audit(account, health=status.health, error_message=status.reason, block_reason=status.last_block_reason)
+        db.commit()
+        return (
+            {
+                "id": account.id,
+                "email": account.email,
+                "success": False,
+                "health": status.health,
+                "label": status.label,
+                "reason": status.reason,
+                "action": "static",
+            },
+            "",
+        )
+
+    email_services = db.query(EmailService).filter(EmailService.enabled.is_(True)).all()
+    email_service, error_message = resolve_email_service_for_account(account, email_services)
+    if not email_service:
+        persist_codex_auth_audit(account, health="missing_prerequisites", error_message=error_message)
+        db.commit()
+        return (
+            {
+                "id": account.id,
+                "email": account.email,
+                "success": False,
+                "health": "missing_prerequisites",
+                "label": "缺条件",
+                "reason": error_message,
+                "action": "static",
+            },
+            "",
+        )
+
+    engine = CodexAuthEngine(
+        email=account.email,
+        password=str(account.password or "").strip(),
+        email_service=email_service,
+        email_service_id=str(account.email_service_id or "").strip() or None,
+        proxy_url=_resolve_codex_auth_proxy(account, request_proxy),
+    )
+    probe_result = engine.run()
+    if probe_result.success:
+        persist_codex_auth_audit(account, health=CODEX_AUTH_REPAIRABLE)
+        db.commit()
+        return (
+            {
+                "id": account.id,
+                "email": account.email,
+                "success": True,
+                "health": CODEX_AUTH_REPAIRABLE,
+                "label": "可修复",
+                "reason": "严格 Codex Auth 探测成功",
+                "action": "probe",
+                "workspace_id": probe_result.workspace_id,
+                "account_id": probe_result.account_id,
+            },
+            "",
+        )
+
+    health = probe_result.health or "unknown"
+    persist_codex_auth_audit(
+        account,
+        health=health,
+        error_message=probe_result.error_message,
+        block_reason=probe_result.block_reason,
+    )
+    db.commit()
+    return (
+        {
+            "id": account.id,
+            "email": account.email,
+            "success": False,
+            "health": health,
+            "label": "受阻" if health == CODEX_AUTH_BLOCKED else "未知",
+            "reason": probe_result.block_reason or probe_result.error_message or "严格 Codex Auth 探测失败",
+            "action": "probe",
+        },
+        "",
+    )
+
+
+def _run_batch_codex_auth_audit_async(task_id: str, request_data: Dict[str, Any]) -> None:
+    acquired, running, quota = task_manager.try_acquire_domain_slot("codex_auth", task_id)
+    if not acquired:
+        reason = f"并发配额已满（running={running}, quota={quota}）"
+        task_manager.update_domain_task(
+            "codex_auth",
+            task_id,
+            status="failed",
+            finished_at=datetime.utcnow().isoformat(),
+            message=reason,
+            error=reason,
+        )
+        return
+
+    request = BatchCodexAuthRequest(**request_data)
+    result = {"success_count": 0, "failed_count": 0, "details": []}
+
+    try:
+        with get_db() as db:
+            accounts = _resolve_codex_auth_accounts(
+                db,
+                ids=request.ids,
+                select_all=request.select_all,
+                status_filter=request.status_filter,
+                email_service_filter=request.email_service_filter,
+                search_filter=request.search_filter,
+            )
+            account_ids = [account.id for account in accounts]
+
+        total = len(account_ids)
+        task_manager.update_domain_task(
+            "codex_auth",
+            task_id,
+            status="running",
+            started_at=datetime.utcnow().isoformat(),
+            paused=False,
+            message="Codex Auth 批量审计执行中",
+            progress={"completed": 0, "total": total},
+        )
+
+        for index, account_id in enumerate(account_ids, start=1):
+            if task_manager.is_domain_task_cancel_requested("codex_auth", task_id):
+                _finalize_codex_auth_async_task(task_id, status="cancelled", message="Codex Auth 审计已取消", result=result)
+                return
+            if not _wait_codex_auth_task_if_paused(task_id):
+                _finalize_codex_auth_async_task(task_id, status="cancelled", message="Codex Auth 审计已取消", result=result)
+                return
+
+            task_manager.update_domain_task(
+                "codex_auth",
+                task_id,
+                status="running",
+                paused=False,
+                message=f"正在审计第 {index}/{total} 个账号",
+            )
+            with get_db() as db:
+                account = crud.get_account_by_id(db, account_id)
+                if not account:
+                    detail = {
+                        "id": account_id,
+                        "success": False,
+                        "health": "unknown",
+                        "reason": "账号不存在",
+                    }
+                else:
+                    detail, _ = _run_codex_auth_online_probe(db, account, request_proxy=request.proxy)
+                    detail = detail or {
+                        "id": account.id,
+                        "email": account.email,
+                        "success": False,
+                        "health": "unknown",
+                        "reason": "审计执行失败",
+                    }
+            if detail.get("success"):
+                result["success_count"] += 1
+            else:
+                result["failed_count"] += 1
+            result["details"].append(detail)
+            task_manager.append_domain_task_detail("codex_auth", task_id, detail)
+            task_manager.set_domain_task_progress("codex_auth", task_id, completed=index, total=total)
+
+        _finalize_codex_auth_async_task(
+            task_id,
+            status="completed",
+            message=f"Codex Auth 审计完成：可继续 {result['success_count']}，失败 {result['failed_count']}",
+            result=result,
+        )
+    except Exception as exc:
+        logger.exception("Codex Auth 审计异步任务失败: task_id=%s error=%s", task_id, exc)
+        _finalize_codex_auth_async_task(
+            task_id,
+            status="failed",
+            message=f"Codex Auth 审计异常: {exc}",
+            error=str(exc),
+            result=result,
+        )
+
+
+def _run_batch_codex_auth_generate_async(task_id: str, request_data: Dict[str, Any]) -> None:
+    acquired, running, quota = task_manager.try_acquire_domain_slot("codex_auth", task_id)
+    if not acquired:
+        reason = f"并发配额已满（running={running}, quota={quota}）"
+        task_manager.update_domain_task(
+            "codex_auth",
+            task_id,
+            status="failed",
+            finished_at=datetime.utcnow().isoformat(),
+            message=reason,
+            error=reason,
+        )
+        return
+
+    request = BatchCodexAuthRequest(**request_data)
+    result = {"success_count": 0, "failed_count": 0, "details": []}
+
+    try:
+        with get_db() as db:
+            accounts = _resolve_codex_auth_accounts(
+                db,
+                ids=request.ids,
+                select_all=request.select_all,
+                status_filter=request.status_filter,
+                email_service_filter=request.email_service_filter,
+                search_filter=request.search_filter,
+            )
+            total = len(accounts)
+            task_manager.update_domain_task(
+                "codex_auth",
+                task_id,
+                status="running",
+                started_at=datetime.utcnow().isoformat(),
+                paused=False,
+                message="Codex Auth 生成任务执行中",
+                progress={"completed": 0, "total": total},
+            )
+
+            for index, account in enumerate(accounts, start=1):
+                if task_manager.is_domain_task_cancel_requested("codex_auth", task_id):
+                    _finalize_codex_auth_async_task(task_id, status="cancelled", message="Codex Auth 生成已取消", result=result)
+                    return
+                if not _wait_codex_auth_task_if_paused(task_id):
+                    _finalize_codex_auth_async_task(task_id, status="cancelled", message="Codex Auth 生成已取消", result=result)
+                    return
+
+                detail: Dict[str, Any] = {"id": account.id, "email": account.email, "success": False}
+                try:
+                    auth_json = build_managed_auth_json(account)
+                    artifact_path = persist_codex_auth_generated_artifact(account, auth_json)
+                    db.commit()
+                    detail.update(
+                        {
+                            "success": True,
+                            "health": CODEX_AUTH_HEALTHY,
+                            "reason": "标准 auth.json 已生成",
+                            "artifact_path": str(artifact_path),
+                        }
+                    )
+                    result["success_count"] += 1
+                except Exception as exc:
+                    db.rollback()
+                    status = resolve_codex_auth_status(account)
+                    update_codex_auth_extra(
+                        account,
+                        health=status.health,
+                        last_error=str(exc),
+                    )
+                    db.commit()
+                    detail.update(
+                        {
+                            "health": status.health,
+                            "reason": str(exc),
+                        }
+                    )
+                    result["failed_count"] += 1
+
+                result["details"].append(detail)
+                task_manager.append_domain_task_detail("codex_auth", task_id, detail)
+                task_manager.set_domain_task_progress("codex_auth", task_id, completed=index, total=total)
+
+        _finalize_codex_auth_async_task(
+            task_id,
+            status="completed",
+            message=f"Codex Auth 生成完成：成功 {result['success_count']}，失败 {result['failed_count']}",
+            result=result,
+        )
+    except Exception as exc:
+        logger.exception("Codex Auth 生成异步任务失败: task_id=%s error=%s", task_id, exc)
+        _finalize_codex_auth_async_task(
+            task_id,
+            status="failed",
+            message=f"Codex Auth 生成异常: {exc}",
+            error=str(exc),
+            result=result,
+        )
+
+
+def _run_batch_codex_auth_repair_async(task_id: str, request_data: Dict[str, Any]) -> None:
+    acquired, running, quota = task_manager.try_acquire_domain_slot("codex_auth", task_id)
+    if not acquired:
+        reason = f"并发配额已满（running={running}, quota={quota}）"
+        task_manager.update_domain_task(
+            "codex_auth",
+            task_id,
+            status="failed",
+            finished_at=datetime.utcnow().isoformat(),
+            message=reason,
+            error=reason,
+        )
+        return
+
+    request = BatchCodexAuthRequest(**request_data)
+    result = {"success_count": 0, "failed_count": 0, "details": []}
+
+    try:
+        with get_db() as db:
+            accounts = _resolve_codex_auth_accounts(
+                db,
+                ids=request.ids,
+                select_all=request.select_all,
+                status_filter=request.status_filter,
+                email_service_filter=request.email_service_filter,
+                search_filter=request.search_filter,
+            )
+            email_services = db.query(EmailService).filter(EmailService.enabled.is_(True)).all()
+            total = len(accounts)
+            task_manager.update_domain_task(
+                "codex_auth",
+                task_id,
+                status="running",
+                started_at=datetime.utcnow().isoformat(),
+                paused=False,
+                message="Codex Auth 严格修复执行中",
+                progress={"completed": 0, "total": total},
+            )
+
+            for index, account in enumerate(accounts, start=1):
+                if task_manager.is_domain_task_cancel_requested("codex_auth", task_id):
+                    _finalize_codex_auth_async_task(task_id, status="cancelled", message="Codex Auth 修复已取消", result=result)
+                    return
+                if not _wait_codex_auth_task_if_paused(task_id):
+                    _finalize_codex_auth_async_task(task_id, status="cancelled", message="Codex Auth 修复已取消", result=result)
+                    return
+
+                task_manager.update_domain_task(
+                    "codex_auth",
+                    task_id,
+                    status="running",
+                    paused=False,
+                    message=f"正在修复第 {index}/{total} 个账号",
+                )
+
+                detail: Dict[str, Any] = {"id": account.id, "email": account.email, "success": False}
+                status = resolve_codex_auth_status(account)
+                if status.complete:
+                    try:
+                        auth_json = build_managed_auth_json(account)
+                        artifact_path = persist_codex_auth_generated_artifact(account, auth_json)
+                        db.commit()
+                        detail.update(
+                            {
+                                "success": True,
+                                "health": CODEX_AUTH_HEALTHY,
+                                "reason": "账号已完整，已补生成 artifact",
+                                "artifact_path": str(artifact_path),
+                            }
+                        )
+                        result["success_count"] += 1
+                    except Exception as exc:
+                        db.rollback()
+                        detail.update({"health": status.health, "reason": str(exc)})
+                        result["failed_count"] += 1
+                    result["details"].append(detail)
+                    task_manager.append_domain_task_detail("codex_auth", task_id, detail)
+                    task_manager.set_domain_task_progress("codex_auth", task_id, completed=index, total=total)
+                    continue
+
+                email_service, service_error = resolve_email_service_for_account(account, email_services)
+                if not email_service:
+                    persist_codex_auth_audit(account, health="missing_prerequisites", error_message=service_error)
+                    db.commit()
+                    detail.update({"health": "missing_prerequisites", "reason": service_error})
+                    result["failed_count"] += 1
+                    result["details"].append(detail)
+                    task_manager.append_domain_task_detail("codex_auth", task_id, detail)
+                    task_manager.set_domain_task_progress("codex_auth", task_id, completed=index, total=total)
+                    continue
+
+                engine = CodexAuthEngine(
+                    email=account.email,
+                    password=str(account.password or "").strip(),
+                    email_service=email_service,
+                    email_service_id=str(account.email_service_id or "").strip() or None,
+                    proxy_url=_resolve_codex_auth_proxy(account, request.proxy),
+                )
+                repair_result = engine.run()
+                if repair_result.success:
+                    artifact_path = persist_codex_auth_success(account, repair_result)
+                    db.commit()
+                    detail.update(
+                        {
+                            "success": True,
+                            "health": CODEX_AUTH_HEALTHY,
+                            "reason": "严格 Codex Auth 修复成功",
+                            "workspace_id": repair_result.workspace_id,
+                            "account_id": repair_result.account_id,
+                            "artifact_path": str(artifact_path),
+                        }
+                    )
+                    result["success_count"] += 1
+                else:
+                    persist_codex_auth_audit(
+                        account,
+                        health=repair_result.health or "unknown",
+                        error_message=repair_result.error_message,
+                        block_reason=repair_result.block_reason,
+                    )
+                    db.commit()
+                    detail.update(
+                        {
+                            "health": repair_result.health or "unknown",
+                            "reason": repair_result.block_reason or repair_result.error_message or "修复失败",
+                        }
+                    )
+                    result["failed_count"] += 1
+
+                result["details"].append(detail)
+                task_manager.append_domain_task_detail("codex_auth", task_id, detail)
+                task_manager.set_domain_task_progress("codex_auth", task_id, completed=index, total=total)
+
+        _finalize_codex_auth_async_task(
+            task_id,
+            status="completed",
+            message=f"Codex Auth 修复完成：成功 {result['success_count']}，失败 {result['failed_count']}",
+            result=result,
+        )
+    except Exception as exc:
+        logger.exception("Codex Auth 修复异步任务失败: task_id=%s error=%s", task_id, exc)
+        _finalize_codex_auth_async_task(
+            task_id,
+            status="failed",
+            message=f"Codex Auth 修复异常: {exc}",
+            error=str(exc),
+            result=result,
+        )
+
+
+def _run_batch_refresh_async(task_id: str, request_data: Dict[str, Any]) -> None:
+    acquired, running, quota = task_manager.try_acquire_domain_slot("accounts", task_id)
+    if not acquired:
+        reason = f"并发配额已满（running={running}, quota={quota}）"
+        task_manager.update_domain_task(
+            "accounts",
+            task_id,
+            status="failed",
+            finished_at=datetime.utcnow().isoformat(),
+            message=reason,
+            error=reason,
+        )
+        return
+
+    result = {"success_count": 0, "failed_count": 0, "errors": [], "details": []}
+
+    try:
+        request = BatchRefreshRequest(**request_data)
+        proxy = _get_proxy(request.proxy)
+        with get_db() as db:
+            ids = resolve_account_ids(
+                db, request.ids, request.select_all,
+                request.status_filter, request.email_service_filter, request.search_filter
+            )
+
+        total = len(ids)
+        task_manager.update_domain_task(
+            "accounts",
+            task_id,
+            status="running",
+            started_at=datetime.utcnow().isoformat(),
+            paused=False,
+            message="批量刷新 Token 执行中",
+            progress={"completed": 0, "total": total},
+        )
+
+        for index, account_id in enumerate(ids, start=1):
+            if task_manager.is_domain_task_cancel_requested("accounts", task_id):
+                _finalize_account_async_task(
+                    task_id,
+                    status="cancelled",
+                    message="批量刷新已取消",
+                    result=result,
+                )
+                return
+            if not _wait_account_task_if_paused(task_id):
+                _finalize_account_async_task(
+                    task_id,
+                    status="cancelled",
+                    message="批量刷新已取消",
+                    result=result,
+                )
+                return
+
+            task_manager.update_domain_task(
+                "accounts",
+                task_id,
+                status="running",
+                paused=False,
+                message=f"正在刷新第 {index}/{total} 个账号",
+            )
+
+            detail: Dict[str, Any] = {"id": account_id, "success": False}
+            try:
+                refresh_result = do_refresh(account_id, proxy)
+                if refresh_result.success:
+                    result["success_count"] += 1
+                    detail["success"] = True
+                    detail["status"] = AccountStatus.ACTIVE.value
+                else:
+                    result["failed_count"] += 1
+                    detail["error"] = refresh_result.error_message
+                    detail["status"] = AccountStatus.FAILED.value
+                    result["errors"].append({"id": account_id, "error": refresh_result.error_message})
+            except Exception as exc:
+                result["failed_count"] += 1
+                detail["error"] = str(exc)
+                detail["status"] = AccountStatus.FAILED.value
+                result["errors"].append({"id": account_id, "error": str(exc)})
+
+            result["details"].append(detail)
+            task_manager.append_domain_task_detail("accounts", task_id, detail)
+            task_manager.set_domain_task_progress("accounts", task_id, completed=index, total=total)
+
+        _finalize_account_async_task(
+            task_id,
+            status="completed",
+            message=f"批量刷新完成：成功 {result['success_count']}，失败 {result['failed_count']}",
+            result=result,
+        )
+    except Exception as exc:
+        logger.exception("批量刷新异步任务失败: task_id=%s error=%s", task_id, exc)
+        _finalize_account_async_task(
+            task_id,
+            status="failed",
+            message=f"批量刷新异常: {exc}",
+            result=result,
+            error=str(exc),
+        )
+
+
+def _run_batch_validate_async(task_id: str, request_data: Dict[str, Any]) -> None:
+    acquired, running, quota = task_manager.try_acquire_domain_slot("accounts", task_id)
+    if not acquired:
+        reason = f"并发配额已满（running={running}, quota={quota}）"
+        task_manager.update_domain_task(
+            "accounts",
+            task_id,
+            status="failed",
+            finished_at=datetime.utcnow().isoformat(),
+            message=reason,
+            error=reason,
+        )
+        return
+
+    result = {"valid_count": 0, "invalid_count": 0, "details": []}
+
+    try:
+        request = BatchValidateRequest(**request_data)
+        proxy = _get_proxy(request.proxy)
+        with get_db() as db:
+            ids = resolve_account_ids(
+                db, request.ids, request.select_all,
+                request.status_filter, request.email_service_filter, request.search_filter
+            )
+
+        total = len(ids)
+        task_manager.update_domain_task(
+            "accounts",
+            task_id,
+            status="running",
+            started_at=datetime.utcnow().isoformat(),
+            paused=False,
+            message="批量验证 Token 执行中",
+            progress={"completed": 0, "total": total},
+        )
+
+        for index, account_id in enumerate(ids, start=1):
+            if task_manager.is_domain_task_cancel_requested("accounts", task_id):
+                _finalize_account_async_task(
+                    task_id,
+                    status="cancelled",
+                    message="批量验证已取消",
+                    result=result,
+                )
+                return
+            if not _wait_account_task_if_paused(task_id):
+                _finalize_account_async_task(
+                    task_id,
+                    status="cancelled",
+                    message="批量验证已取消",
+                    result=result,
+                )
+                return
+
+            task_manager.update_domain_task(
+                "accounts",
+                task_id,
+                status="running",
+                paused=False,
+                message=f"正在验证第 {index}/{total} 个账号",
+            )
+
+            detail: Dict[str, Any] = {"id": account_id, "valid": False, "status": AccountStatus.FAILED.value}
+            try:
+                is_valid, error = do_validate(account_id, proxy)
+                detail["valid"] = bool(is_valid)
+                detail["error"] = error
+                detail["status"] = AccountStatus.ACTIVE.value if is_valid else AccountStatus.FAILED.value
+                if is_valid:
+                    result["valid_count"] += 1
+                else:
+                    result["invalid_count"] += 1
+            except Exception as exc:
+                try:
+                    with get_db() as db:
+                        account = crud.get_account_by_id(db, account_id)
+                        if account and account.status != AccountStatus.FAILED.value:
+                            crud.update_account(db, account_id, status=AccountStatus.FAILED.value)
+                except Exception:
+                    logger.debug("异步验证写回 failed 状态失败: account_id=%s", account_id, exc_info=True)
+                detail["error"] = str(exc)
+                result["invalid_count"] += 1
+
+            result["details"].append(detail)
+            task_manager.append_domain_task_detail("accounts", task_id, detail)
+            task_manager.set_domain_task_progress("accounts", task_id, completed=index, total=total)
+
+        _finalize_account_async_task(
+            task_id,
+            status="completed",
+            message=f"批量验证完成：有效 {result['valid_count']}，无效 {result['invalid_count']}",
+            result=result,
+        )
+    except Exception as exc:
+        logger.exception("批量验证异步任务失败: task_id=%s error=%s", task_id, exc)
+        _finalize_account_async_task(
+            task_id,
+            status="failed",
+            message=f"批量验证异常: {exc}",
+            result=result,
+            error=str(exc),
+        )
+
+
+def _resolve_overview_account_ids(request: "OverviewRefreshRequest") -> List[int]:
+    with get_db() as db:
+        ids = resolve_account_ids(
+            db,
+            request.ids,
+            request.select_all,
+            request.status_filter,
+            request.email_service_filter,
+            request.search_filter,
+        )
+        if ids:
+            return ids
+        candidates = db.query(Account).filter(
+            func.lower(Account.subscription_type).in_(PAID_SUBSCRIPTION_TYPES)
+        ).order_by(Account.created_at.desc()).all()
+        return [acc.id for acc in candidates if not _is_overview_card_removed(acc)]
+
+
+def _run_overview_refresh_async(task_id: str, request_data: Dict[str, Any]) -> None:
+    acquired, running, quota = task_manager.try_acquire_domain_slot("accounts", task_id)
+    if not acquired:
+        reason = f"并发配额已满（running={running}, quota={quota}）"
+        task_manager.update_domain_task(
+            "accounts",
+            task_id,
+            status="failed",
+            finished_at=datetime.utcnow().isoformat(),
+            message=reason,
+            error=reason,
+        )
+        return
+
+    result = {"success_count": 0, "failed_count": 0, "details": []}
+
+    try:
+        request = OverviewRefreshRequest(**request_data)
+        proxy = _get_proxy(request.proxy)
+        ids = _resolve_overview_account_ids(request)
+        total = len(ids)
+        task_manager.update_domain_task(
+            "accounts",
+            task_id,
+            status="running",
+            started_at=datetime.utcnow().isoformat(),
+            paused=False,
+            message="账号总览刷新执行中",
+            progress={"completed": 0, "total": total},
+        )
+
+        for index, account_id in enumerate(ids, start=1):
+            if task_manager.is_domain_task_cancel_requested("accounts", task_id):
+                _finalize_account_async_task(
+                    task_id,
+                    status="cancelled",
+                    message="账号总览刷新已取消",
+                    result=result,
+                )
+                return
+            if not _wait_account_task_if_paused(task_id):
+                _finalize_account_async_task(
+                    task_id,
+                    status="cancelled",
+                    message="账号总览刷新已取消",
+                    result=result,
+                )
+                return
+
+            task_manager.update_domain_task(
+                "accounts",
+                task_id,
+                status="running",
+                paused=False,
+                message=f"正在刷新第 {index}/{total} 个总览",
+            )
+
+            with get_db() as db:
+                account = crud.get_account_by_id(db, account_id)
+                detail: Dict[str, Any] = {"id": account_id, "success": False}
+                if not account:
+                    result["failed_count"] += 1
+                    detail["error"] = "账号不存在"
+                elif (not _is_paid_subscription(account.subscription_type)) or _is_overview_card_removed(account):
+                    detail["error"] = "账号不在 Codex 卡片范围内，已跳过"
+                else:
+                    account_proxy = (account.proxy_used or "").strip() or proxy
+                    overview, updated = _get_account_overview_data(
+                        db,
+                        account,
+                        force_refresh=request.force,
+                        proxy=account_proxy,
+                        allow_network=True,
+                    )
+                    if updated:
+                        db.commit()
+                    if overview.get("hourly_quota", {}).get("status") == "unknown" and overview.get("weekly_quota", {}).get("status") == "unknown":
+                        result["failed_count"] += 1
+                        detail["error"] = overview.get("error") or "未获取到配额数据"
+                    else:
+                        result["success_count"] += 1
+                        detail["success"] = True
+                        detail["plan_type"] = overview.get("plan_type")
+
+            result["details"].append(detail)
+            task_manager.append_domain_task_detail("accounts", task_id, detail)
+            task_manager.set_domain_task_progress("accounts", task_id, completed=index, total=total)
+
+        _finalize_account_async_task(
+            task_id,
+            status="completed",
+            message=f"账号总览刷新完成：成功 {result['success_count']}，失败 {result['failed_count']}",
+            result=result,
+        )
+    except Exception as exc:
+        logger.exception("账号总览异步刷新失败: task_id=%s error=%s", task_id, exc)
+        _finalize_account_async_task(
+            task_id,
+            status="failed",
+            message=f"账号总览刷新异常: {exc}",
+            result=result,
+            error=str(exc),
+        )
+
+
+def cancel_account_async_task(task_id: str) -> Dict[str, Any]:
+    _get_account_task_or_404(task_id)
+    snapshot = task_manager.request_domain_task_cancel("accounts", task_id)
+    return {
+        "success": True,
+        "task_id": task_id,
+        "status": "cancelling",
+        "task": snapshot,
+    }
+
+
+def pause_account_async_task(task_id: str) -> Dict[str, Any]:
+    _get_account_task_or_404(task_id)
+    snapshot = task_manager.request_domain_task_pause("accounts", task_id)
+    return {
+        "success": True,
+        "task_id": task_id,
+        "status": "paused",
+        "task": snapshot,
+    }
+
+
+def resume_account_async_task(task_id: str) -> Dict[str, Any]:
+    _get_account_task_or_404(task_id)
+    snapshot = task_manager.request_domain_task_resume("accounts", task_id)
+    return {
+        "success": True,
+        "task_id": task_id,
+        "status": "running",
+        "task": snapshot,
+    }
+
+
+def retry_account_async_task(task_id: str) -> Dict[str, Any]:
+    snapshot = _get_account_task_or_404(task_id)
+    payload = dict(snapshot.get("payload") or {})
+    task_type = str(snapshot.get("task_type") or "").strip().lower()
+
+    if task_type == "batch_refresh":
+        return create_batch_refresh_async_task(BatchRefreshRequest(**payload))
+    if task_type == "batch_validate":
+        return create_batch_validate_async_task(BatchValidateRequest(**payload))
+    if task_type == "overview_refresh":
+        return create_overview_refresh_async_task(OverviewRefreshRequest(**payload))
+    raise HTTPException(status_code=400, detail="当前任务类型不支持重试")
 
 
 def _is_retryable_validate_error(error_message: Optional[str]) -> bool:
@@ -147,6 +1154,10 @@ class AccountResponse(BaseModel):
     expires_at: Optional[str] = None
     status: str
     proxy_used: Optional[str] = None
+    account_label: Optional[str] = None
+    role_tag: Optional[str] = None
+    priority: Optional[int] = None
+    last_used_at: Optional[str] = None
     cpa_uploaded: bool = False
     cpa_uploaded_at: Optional[str] = None
     subscription_type: Optional[str] = None
@@ -154,6 +1165,7 @@ class AccountResponse(BaseModel):
     cookies: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    codex_auth: Dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -292,6 +1304,7 @@ def resolve_account_ids(
 
 def account_to_response(account: Account) -> AccountResponse:
     """转换 Account 模型为响应模型"""
+    codex_auth = resolve_codex_auth_status(account).to_dict()
     return AccountResponse(
         id=account.id,
         email=account.email,
@@ -306,6 +1319,10 @@ def account_to_response(account: Account) -> AccountResponse:
         expires_at=account.expires_at.isoformat() if account.expires_at else None,
         status=account.status,
         proxy_used=account.proxy_used,
+        account_label=getattr(account, "account_label", None),
+        role_tag=getattr(account, "role_tag", None),
+        priority=getattr(account, "priority", None),
+        last_used_at=account.last_used_at.isoformat() if getattr(account, "last_used_at", None) else None,
         cpa_uploaded=account.cpa_uploaded or False,
         cpa_uploaded_at=account.cpa_uploaded_at.isoformat() if account.cpa_uploaded_at else None,
         subscription_type=account.subscription_type,
@@ -313,7 +1330,156 @@ def account_to_response(account: Account) -> AccountResponse:
         cookies=account.cookies,
         created_at=account.created_at.isoformat() if account.created_at else None,
         updated_at=account.updated_at.isoformat() if account.updated_at else None,
+        codex_auth=codex_auth,
     )
+
+
+def _has_non_empty_text_sql(column):
+    return func.length(func.trim(func.coalesce(column, ""))) > 0
+
+
+def _to_bool_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or "").strip().lower()
+    return text not in {"", "0", "false", "none", "null"}
+
+
+def _extract_codex_auth_meta(extra_data_text: Optional[str]) -> Dict[str, Any]:
+    text = str(extra_data_text or "").strip()
+    if not text or CODEX_AUTH_EXTRA_KEY not in text:
+        return {}
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return {}
+    codex_auth = payload.get(CODEX_AUTH_EXTRA_KEY)
+    return dict(codex_auth) if isinstance(codex_auth, dict) else {}
+
+
+def _build_list_codex_auth_payload(
+    *,
+    has_access_token: Any,
+    has_refresh_token: Any,
+    has_id_token: Any,
+    has_account_id: Any,
+    has_password: Any,
+    has_session_material: Any,
+    extra_data_text: Optional[str],
+) -> Dict[str, Any]:
+    meta = _extract_codex_auth_meta(extra_data_text)
+    complete = all(
+        [
+            _to_bool_flag(has_access_token),
+            _to_bool_flag(has_refresh_token),
+            _to_bool_flag(has_id_token),
+            _to_bool_flag(has_account_id),
+        ]
+    )
+    artifact_path = str(meta.get("artifact_path") or "").strip()
+    generated = bool(meta.get("generated")) and bool(artifact_path)
+    last_error = str(meta.get("last_error") or "").strip()
+    last_block_reason = str(meta.get("last_block_reason") or "").strip()
+    payload = {
+        "generated": generated,
+        "export_ready": complete,
+        "complete": complete,
+        "generated_at": str(meta.get("generated_at") or "") or None,
+        "last_audit_at": str(meta.get("last_audit_at") or "") or None,
+        "last_success_at": str(meta.get("last_success_at") or "") or None,
+        "last_error": last_error,
+        "last_block_reason": last_block_reason,
+        "artifact_path": artifact_path,
+    }
+    if complete:
+        return {
+            **payload,
+            "health": CODEX_AUTH_HEALTHY,
+            "label": "健康",
+            "reason": "完整 Managed Auth 可用",
+        }
+    if last_block_reason:
+        return {
+            **payload,
+            "generated": False,
+            "export_ready": False,
+            "health": CODEX_AUTH_BLOCKED,
+            "label": "受阻",
+            "reason": last_block_reason,
+        }
+    missing = []
+    if not _to_bool_flag(has_password):
+        missing.append("password")
+    if not _to_bool_flag(has_session_material):
+        missing.append("session")
+    if missing:
+        return {
+            **payload,
+            "generated": False,
+            "export_ready": False,
+            "health": CODEX_AUTH_MISSING,
+            "label": "缺条件",
+            "reason": f"缺少前置条件: {', '.join(missing)}",
+        }
+    return {
+        **payload,
+        "generated": False,
+        "export_ready": False,
+        "health": CODEX_AUTH_REPAIRABLE,
+        "label": "可修复",
+        "reason": "可尝试严格 Codex Auth 修复",
+    }
+
+
+def _account_list_row_to_response(row: Any) -> AccountResponse:
+    codex_auth = _build_list_codex_auth_payload(
+        has_access_token=getattr(row, "has_access_token", False),
+        has_refresh_token=getattr(row, "has_refresh_token", False),
+        has_id_token=getattr(row, "has_id_token", False),
+        has_account_id=getattr(row, "has_account_id", False),
+        has_password=getattr(row, "has_password", False),
+        has_session_material=getattr(row, "has_session_material", False),
+        extra_data_text=getattr(row, "extra_data_text", None),
+    )
+    return AccountResponse(
+        id=row.id,
+        email=row.email,
+        password=row.password,
+        email_service=row.email_service,
+        status=row.status,
+        account_label=getattr(row, "account_label", None),
+        role_tag=getattr(row, "role_tag", None),
+        priority=getattr(row, "priority", None),
+        last_used_at=row.last_used_at.isoformat() if getattr(row, "last_used_at", None) else None,
+        cpa_uploaded=bool(getattr(row, "cpa_uploaded", False)),
+        cpa_uploaded_at=row.cpa_uploaded_at.isoformat() if getattr(row, "cpa_uploaded_at", None) else None,
+        subscription_type=getattr(row, "subscription_type", None),
+        last_refresh=row.last_refresh.isoformat() if getattr(row, "last_refresh", None) else None,
+        created_at=row.created_at.isoformat() if getattr(row, "created_at", None) else None,
+        codex_auth=codex_auth,
+    )
+
+
+def _apply_account_list_filters(
+    query,
+    *,
+    status: Optional[str],
+    email_service: Optional[str],
+    search: Optional[str],
+):
+    if status:
+        query = _apply_status_filter(query, status)
+    if email_service:
+        query = query.filter(Account.email_service == email_service)
+    if search:
+        search_pattern = f"%{search}%"
+        query = query.filter(
+            (Account.email.ilike(search_pattern)) |
+            (Account.account_id.ilike(search_pattern))
+        )
+    return query
 
 
 def _extract_cookie_value(cookies_text: Optional[str], cookie_name: str) -> str:
@@ -682,7 +1848,7 @@ def _get_account_overview_data(
 # ============== API Endpoints ==============
 
 @router.post("", response_model=AccountResponse)
-async def create_manual_account(request: ManualAccountCreateRequest):
+def create_manual_account(request: ManualAccountCreateRequest):
     """
     手动新增账号（邮箱 + 密码）。
     """
@@ -737,7 +1903,7 @@ async def create_manual_account(request: ManualAccountCreateRequest):
 
 
 @router.post("/import")
-async def import_accounts(request: ImportAccountsRequest):
+def import_accounts(request: ImportAccountsRequest):
     """
     一键导入账号（账号总览卡片使用）。
     支持按账号详情字段导入；可选覆盖同邮箱已有账号。
@@ -930,7 +2096,7 @@ async def import_accounts(request: ImportAccountsRequest):
 
 
 @router.get("", response_model=AccountListResponse)
-async def list_accounts(
+def list_accounts(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     status: Optional[str] = Query(None, description="状态筛选"),
@@ -943,40 +2109,66 @@ async def list_accounts(
     支持分页、状态筛选、邮箱服务筛选和搜索
     """
     with get_db() as db:
-        # 构建查询
-        query = db.query(Account)
-
-        # 状态筛选
-        if status:
-            query = _apply_status_filter(query, status)
-
-        # 邮箱服务筛选
-        if email_service:
-            query = query.filter(Account.email_service == email_service)
-
-        # 搜索
-        if search:
-            search_pattern = f"%{search}%"
-            query = query.filter(
-                (Account.email.ilike(search_pattern)) |
-                (Account.account_id.ilike(search_pattern))
-            )
-
-        # 统计总数
-        total = query.count()
-
-        # 分页
         offset = (page - 1) * page_size
-        accounts = query.order_by(Account.created_at.desc()).offset(offset).limit(page_size).all()
+        extra_data_text = cast(Account.__table__.c.extra_data, String).label("extra_data_text")
+        list_query = db.query(
+            Account.id.label("id"),
+            Account.email.label("email"),
+            Account.password.label("password"),
+            Account.email_service.label("email_service"),
+            Account.status.label("status"),
+            Account.account_label.label("account_label"),
+            Account.role_tag.label("role_tag"),
+            Account.priority.label("priority"),
+            Account.last_used_at.label("last_used_at"),
+            Account.cpa_uploaded.label("cpa_uploaded"),
+            Account.cpa_uploaded_at.label("cpa_uploaded_at"),
+            Account.subscription_type.label("subscription_type"),
+            Account.last_refresh.label("last_refresh"),
+            Account.created_at.label("created_at"),
+            _has_non_empty_text_sql(Account.access_token).label("has_access_token"),
+            _has_non_empty_text_sql(Account.refresh_token).label("has_refresh_token"),
+            _has_non_empty_text_sql(Account.id_token).label("has_id_token"),
+            _has_non_empty_text_sql(Account.account_id).label("has_account_id"),
+            _has_non_empty_text_sql(Account.password).label("has_password"),
+            (_has_non_empty_text_sql(Account.session_token) | _has_non_empty_text_sql(Account.cookies)).label(
+                "has_session_material"
+            ),
+            extra_data_text,
+        )
+        list_query = _apply_account_list_filters(
+            list_query,
+            status=status,
+            email_service=email_service,
+            search=search,
+        )
+        accounts = (
+            list_query
+            .order_by(Account.created_at.desc(), Account.id.desc())
+            .offset(offset)
+            .limit(page_size)
+            .all()
+        )
+        if page == 1 and len(accounts) < page_size:
+            total = len(accounts)
+        else:
+            total_query = db.query(func.count(Account.id))
+            total_query = _apply_account_list_filters(
+                total_query,
+                status=status,
+                email_service=email_service,
+                search=search,
+            )
+            total = int(total_query.scalar() or 0)
 
         return AccountListResponse(
             total=total,
-            accounts=[account_to_response(acc) for acc in accounts]
+            accounts=[_account_list_row_to_response(row) for row in accounts]
         )
 
 
 @router.get("/overview/cards")
-async def list_accounts_overview_cards(
+def list_accounts_overview_cards(
     refresh: bool = Query(False, description="是否强制刷新远端配额"),
     search: Optional[str] = Query(None, description="按邮箱搜索"),
     status: Optional[str] = Query(None, description="状态筛选"),
@@ -1076,7 +2268,7 @@ async def list_accounts_overview_cards(
 
 
 @router.get("/overview/cards/addable")
-async def list_accounts_overview_addable(
+def list_accounts_overview_addable(
     search: Optional[str] = Query(None, description="按邮箱搜索"),
     status: Optional[str] = Query(None, description="状态筛选"),
     email_service: Optional[str] = Query(None, description="邮箱服务筛选"),
@@ -1118,7 +2310,7 @@ async def list_accounts_overview_addable(
 
 
 @router.get("/overview/cards/selectable")
-async def list_accounts_overview_selectable(
+def list_accounts_overview_selectable(
     search: Optional[str] = Query(None, description="按邮箱搜索"),
     status: Optional[str] = Query(None, description="状态筛选"),
     email_service: Optional[str] = Query(None, description="邮箱服务筛选"),
@@ -1165,7 +2357,7 @@ async def list_accounts_overview_selectable(
 
 
 @router.post("/overview/cards/remove")
-async def remove_accounts_overview_cards(request: OverviewCardDeleteRequest):
+def remove_accounts_overview_cards(request: OverviewCardDeleteRequest):
     """从账号总览卡片移除（软删除，不影响账号管理列表）。"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -1197,7 +2389,7 @@ async def remove_accounts_overview_cards(request: OverviewCardDeleteRequest):
 
 
 @router.post("/overview/cards/{account_id}/restore")
-async def restore_accounts_overview_card(account_id: int):
+def restore_accounts_overview_card(account_id: int):
     """恢复单个已删除的总览卡片。"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -1212,7 +2404,7 @@ async def restore_accounts_overview_card(account_id: int):
 
 
 @router.post("/overview/cards/{account_id}/attach")
-async def attach_accounts_overview_card(account_id: int):
+def attach_accounts_overview_card(account_id: int):
     """从账号管理选择账号附加到总览卡片（已存在时保持幂等）。"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -1233,7 +2425,7 @@ async def attach_accounts_overview_card(account_id: int):
 
 
 @router.post("/overview/refresh")
-async def refresh_accounts_overview(request: OverviewRefreshRequest):
+def refresh_accounts_overview(request: OverviewRefreshRequest):
     """
     批量刷新账号总览数据。
     """
@@ -1340,8 +2532,25 @@ async def refresh_accounts_overview(request: OverviewRefreshRequest):
     return result
 
 
+@router.post("/overview/refresh/async")
+def create_overview_refresh_async_task(request: OverviewRefreshRequest):
+    payload = request.model_dump()
+    ids = _resolve_overview_account_ids(request)
+    task_id = _account_task_id("overview-refresh")
+    snapshot = task_manager.register_domain_task(
+        domain="accounts",
+        task_id=task_id,
+        task_type="overview_refresh",
+        payload=payload,
+        progress={"completed": 0, "total": len(ids)},
+        max_retries=3,
+    )
+    _submit_account_async_task(task_id, _run_overview_refresh_async, payload)
+    return snapshot
+
+
 @router.get("/current")
-async def get_current_account():
+def get_current_account():
     """获取当前已切换的账号"""
     with get_db() as db:
         current_id = _get_current_account_id(db)
@@ -1363,7 +2572,7 @@ async def get_current_account():
 
 
 @router.post("/{account_id}/switch")
-async def switch_current_account(account_id: int):
+def switch_current_account(account_id: int):
     """
     一键切换当前账号。
     """
@@ -1384,7 +2593,7 @@ async def switch_current_account(account_id: int):
 
 
 @router.get("/{account_id}", response_model=AccountResponse)
-async def get_account(account_id: int):
+def get_account(account_id: int):
     """获取单个账号详情"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -1394,7 +2603,7 @@ async def get_account(account_id: int):
 
 
 @router.get("/{account_id}/tokens")
-async def get_account_tokens(account_id: int):
+def get_account_tokens(account_id: int):
     """获取账号的 Token 信息"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -1425,7 +2634,7 @@ async def get_account_tokens(account_id: int):
 
 
 @router.patch("/{account_id}", response_model=AccountResponse)
-async def update_account(account_id: int, request: AccountUpdateRequest):
+def update_account(account_id: int, request: AccountUpdateRequest):
     """更新账号状态"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -1457,7 +2666,7 @@ async def update_account(account_id: int, request: AccountUpdateRequest):
 
 
 @router.get("/{account_id}/cookies")
-async def get_account_cookies(account_id: int):
+def get_account_cookies(account_id: int):
     """获取账号的 cookie 字符串（仅供支付使用）"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -1467,7 +2676,7 @@ async def get_account_cookies(account_id: int):
 
 
 @router.delete("/{account_id}")
-async def delete_account(account_id: int):
+def delete_account(account_id: int):
     """删除单个账号"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
@@ -1479,7 +2688,7 @@ async def delete_account(account_id: int):
 
 
 @router.post("/batch-delete")
-async def batch_delete_accounts(request: BatchDeleteRequest):
+def batch_delete_accounts(request: BatchDeleteRequest):
     """批量删除账号"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -1506,7 +2715,7 @@ async def batch_delete_accounts(request: BatchDeleteRequest):
 
 
 @router.post("/batch-update")
-async def batch_update_accounts(request: BatchUpdateRequest):
+def batch_update_accounts(request: BatchUpdateRequest):
     """批量更新账号状态"""
     if request.status not in [e.value for e in AccountStatus]:
         raise HTTPException(status_code=400, detail="无效的状态值")
@@ -1540,8 +2749,18 @@ class BatchExportRequest(BaseModel):
     search_filter: Optional[str] = None
 
 
+class BatchCodexAuthRequest(BaseModel):
+    """Codex Auth 批量请求"""
+    ids: List[int] = []
+    select_all: bool = False
+    status_filter: Optional[str] = None
+    email_service_filter: Optional[str] = None
+    search_filter: Optional[str] = None
+    proxy: Optional[str] = None
+
+
 @router.post("/export/json")
-async def export_accounts_json(request: BatchExportRequest):
+def export_accounts_json(request: BatchExportRequest):
     """导出账号为 JSON 格式"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -1584,7 +2803,7 @@ async def export_accounts_json(request: BatchExportRequest):
 
 
 @router.post("/export/csv")
-async def export_accounts_csv(request: BatchExportRequest):
+def export_accounts_csv(request: BatchExportRequest):
     """导出账号为 CSV 格式"""
     import csv
     import io
@@ -1640,7 +2859,7 @@ async def export_accounts_csv(request: BatchExportRequest):
 
 
 @router.post("/export/sub2api")
-async def export_accounts_sub2api(request: BatchExportRequest):
+def export_accounts_sub2api(request: BatchExportRequest):
     """导出账号为 Sub2Api 格式（所有选中账号合并到一个 JSON 的 accounts 数组中）"""
 
     def make_account_entry(acc) -> dict:
@@ -1704,7 +2923,7 @@ async def export_accounts_sub2api(request: BatchExportRequest):
 
 
 @router.post("/export/codex")
-async def export_accounts_codex(request: BatchExportRequest):
+def export_accounts_codex(request: BatchExportRequest):
     """????? Codex ???????"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -1740,7 +2959,7 @@ async def export_accounts_codex(request: BatchExportRequest):
 
 
 @router.post("/export/cpa")
-async def export_accounts_cpa(request: BatchExportRequest):
+def export_accounts_cpa(request: BatchExportRequest):
     """导出账号为 CPA Token JSON 格式（每个账号单独一个 JSON 文件，打包为 ZIP）"""
     with get_db() as db:
         ids = resolve_account_ids(
@@ -1781,7 +3000,7 @@ async def export_accounts_cpa(request: BatchExportRequest):
 
 
 @router.get("/stats/summary")
-async def get_accounts_stats():
+def get_accounts_stats():
     """获取账号统计信息"""
     with get_db() as db:
         from sqlalchemy import func
@@ -1809,7 +3028,7 @@ async def get_accounts_stats():
 
 
 @router.get("/stats/overview")
-async def get_accounts_overview():
+def get_accounts_overview():
     """获取账号总览统计信息（用于总览页面）"""
     with get_db() as db:
         total = db.query(func.count(Account.id)).scalar() or 0
@@ -1917,7 +3136,7 @@ class BatchValidateRequest(BaseModel):
 
 
 @router.post("/batch-refresh")
-async def batch_refresh_tokens(request: BatchRefreshRequest, background_tasks: BackgroundTasks):
+def batch_refresh_tokens(request: BatchRefreshRequest, background_tasks: BackgroundTasks):
     """批量刷新账号 Token"""
     proxy = _get_proxy(request.proxy)
 
@@ -1948,8 +3167,30 @@ async def batch_refresh_tokens(request: BatchRefreshRequest, background_tasks: B
     return results
 
 
+@router.post("/batch-refresh/async")
+def create_batch_refresh_async_task(request: BatchRefreshRequest):
+    payload = request.model_dump()
+    with get_db() as db:
+        ids = resolve_account_ids(
+            db, request.ids, request.select_all,
+            request.status_filter, request.email_service_filter, request.search_filter
+        )
+
+    task_id = _account_task_id("batch-refresh")
+    snapshot = task_manager.register_domain_task(
+        domain="accounts",
+        task_id=task_id,
+        task_type="batch_refresh",
+        payload=payload,
+        progress={"completed": 0, "total": len(ids)},
+        max_retries=3,
+    )
+    _submit_account_async_task(task_id, _run_batch_refresh_async, payload)
+    return snapshot
+
+
 @router.post("/{account_id}/refresh")
-async def refresh_account_token(account_id: int, request: Optional[TokenRefreshRequest] = Body(default=None)):
+def refresh_account_token(account_id: int, request: Optional[TokenRefreshRequest] = Body(default=None)):
     """刷新单个账号的 Token"""
     proxy = _get_proxy(request.proxy if request else None)
     result = do_refresh(account_id, proxy)
@@ -2015,9 +3256,31 @@ def _run_batch_validate_tokens(request: BatchValidateRequest) -> Dict[str, Any]:
 
 
 @router.post("/batch-validate")
-async def batch_validate_tokens(request: BatchValidateRequest):
+def batch_validate_tokens(request: BatchValidateRequest):
     """批量验证账号 Token 有效性"""
     return _run_batch_validate_tokens(request)
+
+
+@router.post("/batch-validate/async")
+def create_batch_validate_async_task(request: BatchValidateRequest):
+    payload = request.model_dump()
+    with get_db() as db:
+        ids = resolve_account_ids(
+            db, request.ids, request.select_all,
+            request.status_filter, request.email_service_filter, request.search_filter
+        )
+
+    task_id = _account_task_id("batch-validate")
+    snapshot = task_manager.register_domain_task(
+        domain="accounts",
+        task_id=task_id,
+        task_type="batch_validate",
+        payload=payload,
+        progress={"completed": 0, "total": len(ids)},
+        max_retries=3,
+    )
+    _submit_account_async_task(task_id, _run_batch_validate_async, payload)
+    return snapshot
 
 
 def run_quick_refresh_workflow(source: str = "manual") -> Dict[str, Any]:
@@ -2085,7 +3348,7 @@ def run_quick_refresh_workflow(source: str = "manual") -> Dict[str, Any]:
 
 
 @router.post("/{account_id}/validate")
-async def validate_account_token(account_id: int, request: Optional[TokenValidateRequest] = Body(default=None)):
+def validate_account_token(account_id: int, request: Optional[TokenValidateRequest] = Body(default=None)):
     """验证单个账号的 Token 有效性"""
     proxy = _get_proxy(request.proxy if request else None)
     is_valid, error = do_validate(account_id, proxy)
@@ -2095,6 +3358,128 @@ async def validate_account_token(account_id: int, request: Optional[TokenValidat
         "valid": is_valid,
         "error": error
     }
+
+
+@router.get("/tasks/{task_id}")
+def get_account_async_task(task_id: str):
+    return _get_account_task_or_404(task_id)
+
+
+@router.post("/codex-auth/audit/async")
+def create_codex_auth_audit_task(request: BatchCodexAuthRequest):
+    payload = request.model_dump()
+    with get_db() as db:
+        accounts = _resolve_codex_auth_accounts(
+            db,
+            ids=request.ids,
+            select_all=request.select_all,
+            status_filter=request.status_filter,
+            email_service_filter=request.email_service_filter,
+            search_filter=request.search_filter,
+        )
+
+    task_id = _codex_auth_task_id("audit")
+    snapshot = task_manager.register_domain_task(
+        domain="codex_auth",
+        task_id=task_id,
+        task_type="codex_auth_audit",
+        payload=payload,
+        progress={"completed": 0, "total": len(accounts)},
+        max_retries=0,
+    )
+    _submit_codex_auth_async_task(task_id, _run_batch_codex_auth_audit_async, payload)
+    return snapshot
+
+
+@router.post("/codex-auth/generate/async")
+def create_codex_auth_generate_task(request: BatchCodexAuthRequest):
+    payload = request.model_dump()
+    with get_db() as db:
+        accounts = _resolve_codex_auth_accounts(
+            db,
+            ids=request.ids,
+            select_all=request.select_all,
+            status_filter=request.status_filter,
+            email_service_filter=request.email_service_filter,
+            search_filter=request.search_filter,
+        )
+
+    task_id = _codex_auth_task_id("generate")
+    snapshot = task_manager.register_domain_task(
+        domain="codex_auth",
+        task_id=task_id,
+        task_type="codex_auth_generate",
+        payload=payload,
+        progress={"completed": 0, "total": len(accounts)},
+        max_retries=0,
+    )
+    _submit_codex_auth_async_task(task_id, _run_batch_codex_auth_generate_async, payload)
+    return snapshot
+
+
+@router.post("/codex-auth/repair/async")
+def create_codex_auth_repair_task(request: BatchCodexAuthRequest):
+    payload = request.model_dump()
+    with get_db() as db:
+        accounts = _resolve_codex_auth_accounts(
+            db,
+            ids=request.ids,
+            select_all=request.select_all,
+            status_filter=request.status_filter,
+            email_service_filter=request.email_service_filter,
+            search_filter=request.search_filter,
+        )
+
+    task_id = _codex_auth_task_id("repair")
+    snapshot = task_manager.register_domain_task(
+        domain="codex_auth",
+        task_id=task_id,
+        task_type="codex_auth_repair",
+        payload=payload,
+        progress={"completed": 0, "total": len(accounts)},
+        max_retries=0,
+    )
+    _submit_codex_auth_async_task(task_id, _run_batch_codex_auth_repair_async, payload)
+    return snapshot
+
+
+@router.get("/codex-auth/tasks/{task_id}")
+def get_codex_auth_async_task(task_id: str):
+    return _get_codex_auth_task_or_404(task_id)
+
+
+@router.post("/codex-auth/export")
+def export_codex_auth_artifacts(request: BatchCodexAuthRequest):
+    with get_db() as db:
+        accounts = _resolve_codex_auth_accounts(
+            db,
+            ids=request.ids,
+            select_all=request.select_all,
+            status_filter=request.status_filter,
+            email_service_filter=request.email_service_filter,
+            search_filter=request.search_filter,
+        )
+
+        try:
+            entries = build_codex_auth_zip_entries(accounts)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not entries:
+            raise HTTPException(status_code=400, detail="没有可导出的 Codex Auth 账号")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for filename, content in entries:
+                zf.writestr(filename, content)
+
+        zip_buffer.seek(0)
+        filename = f"codex_auth_{timestamp}.zip"
+        return StreamingResponse(
+            iter([zip_buffer.getvalue()]),
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
 
 
 # ============== CPA 上传相关 ==============
@@ -2117,7 +3502,7 @@ class BatchCPAUploadRequest(BaseModel):
 
 
 @router.post("/batch-upload-cpa")
-async def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
+def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
     """批量上传账号到 CPA"""
 
     proxy = request.proxy if request.proxy else get_settings().proxy_url
@@ -2144,7 +3529,7 @@ async def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
 
 
 @router.post("/{account_id}/upload-cpa")
-async def upload_account_to_cpa(account_id: int, request: Optional[CPAUploadRequest] = Body(default=None)):
+def upload_account_to_cpa(account_id: int, request: Optional[CPAUploadRequest] = Body(default=None)):
     """上传单个账号到 CPA"""
 
     proxy = request.proxy if request and request.proxy else get_settings().proxy_url
@@ -2207,7 +3592,7 @@ class BatchSub2ApiUploadRequest(BaseModel):
 
 
 @router.post("/batch-upload-sub2api")
-async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
+def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
     """批量上传账号到 Sub2API"""
 
     # 解析指定的 Sub2API 服务
@@ -2245,7 +3630,7 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
 
 
 @router.post("/{account_id}/upload-sub2api")
-async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUploadRequest] = Body(default=None)):
+def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUploadRequest] = Body(default=None)):
     """上传单个账号到 Sub2API"""
 
     service_id = request.service_id if request else None
@@ -2305,7 +3690,7 @@ class BatchNewApiUploadRequest(BaseModel):
 
 
 @router.post("/batch-upload-new-api")
-async def batch_upload_accounts_to_new_api(request: BatchNewApiUploadRequest):
+def batch_upload_accounts_to_new_api(request: BatchNewApiUploadRequest):
     """批量上传账号到 new-api。"""
     with get_db() as db:
         if request.service_id:
@@ -2331,7 +3716,7 @@ async def batch_upload_accounts_to_new_api(request: BatchNewApiUploadRequest):
 
 
 @router.post("/{account_id}/upload-new-api")
-async def upload_account_to_new_api(account_id: int, request: Optional[NewApiUploadRequest] = Body(default=None)):
+def upload_account_to_new_api(account_id: int, request: Optional[NewApiUploadRequest] = Body(default=None)):
     """上传单个账号到 new-api。"""
     service_id = request.service_id if request else None
 
@@ -2376,7 +3761,7 @@ class BatchUploadTMRequest(BaseModel):
 
 
 @router.post("/batch-upload-tm")
-async def batch_upload_accounts_to_tm(request: BatchUploadTMRequest):
+def batch_upload_accounts_to_tm(request: BatchUploadTMRequest):
     """批量上传账号到 Team Manager"""
 
     with get_db() as db:
@@ -2402,7 +3787,7 @@ async def batch_upload_accounts_to_tm(request: BatchUploadTMRequest):
 
 
 @router.post("/{account_id}/upload-tm")
-async def upload_account_to_tm(account_id: int, request: Optional[UploadTMRequest] = Body(default=None)):
+def upload_account_to_tm(account_id: int, request: Optional[UploadTMRequest] = Body(default=None)):
     """上传单账号到 Team Manager"""
 
     service_id = request.service_id if request else None
@@ -2508,7 +3893,7 @@ def _build_inbox_config(db, service_type, email: str) -> dict:
 
 
 @router.post("/{account_id}/inbox-code")
-async def get_account_inbox_code(account_id: int):
+def get_account_inbox_code(account_id: int):
     """查询账号邮箱收件箱最新验证码"""
     from ...services import EmailServiceFactory, EmailServiceType
 

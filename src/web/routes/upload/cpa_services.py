@@ -69,7 +69,7 @@ def _to_response(svc) -> CpaServiceResponse:
 # ============== API Endpoints ==============
 
 @router.get("", response_model=List[CpaServiceResponse])
-async def list_cpa_services(enabled: Optional[bool] = None):
+def list_cpa_services(enabled: Optional[bool] = None):
     """获取 CPA 服务列表"""
     with get_db() as db:
         services = crud.get_cpa_services(db, enabled=enabled)
@@ -77,7 +77,7 @@ async def list_cpa_services(enabled: Optional[bool] = None):
 
 
 @router.post("", response_model=CpaServiceResponse)
-async def create_cpa_service(request: CpaServiceCreate):
+def create_cpa_service(request: CpaServiceCreate):
     """新增 CPA 服务"""
     with get_db() as db:
         service = crud.create_cpa_service(
@@ -93,7 +93,7 @@ async def create_cpa_service(request: CpaServiceCreate):
 
 
 @router.get("/{service_id}", response_model=CpaServiceResponse)
-async def get_cpa_service(service_id: int):
+def get_cpa_service(service_id: int):
     """获取单个 CPA 服务详情"""
     with get_db() as db:
         service = crud.get_cpa_service_by_id(db, service_id)
@@ -103,7 +103,7 @@ async def get_cpa_service(service_id: int):
 
 
 @router.get("/{service_id}/full")
-async def get_cpa_service_full(service_id: int):
+def get_cpa_service_full(service_id: int):
     """获取 CPA 服务完整配置（含 token）"""
     with get_db() as db:
         service = crud.get_cpa_service_by_id(db, service_id)
@@ -121,7 +121,7 @@ async def get_cpa_service_full(service_id: int):
 
 
 @router.patch("/{service_id}", response_model=CpaServiceResponse)
-async def update_cpa_service(service_id: int, request: CpaServiceUpdate):
+def update_cpa_service(service_id: int, request: CpaServiceUpdate):
     """更新 CPA 服务配置"""
     with get_db() as db:
         service = crud.get_cpa_service_by_id(db, service_id)
@@ -148,7 +148,7 @@ async def update_cpa_service(service_id: int, request: CpaServiceUpdate):
 
 
 @router.delete("/{service_id}")
-async def delete_cpa_service(service_id: int):
+def delete_cpa_service(service_id: int):
     """删除 CPA 服务"""
     with get_db() as db:
         service = crud.get_cpa_service_by_id(db, service_id)
@@ -159,7 +159,7 @@ async def delete_cpa_service(service_id: int):
 
 
 @router.post("/{service_id}/test")
-async def test_cpa_service(service_id: int):
+def test_cpa_service(service_id: int):
     """测试 CPA 服务连接"""
     with get_db() as db:
         service = crud.get_cpa_service_by_id(db, service_id)
@@ -170,7 +170,7 @@ async def test_cpa_service(service_id: int):
 
 
 @router.post("/test-connection")
-async def test_cpa_connection_direct(request: CpaServiceTestRequest):
+def test_cpa_connection_direct(request: CpaServiceTestRequest):
     """直接测试 CPA 连接（用于添加前验证）"""
     if not request.api_url or not request.api_token:
         raise HTTPException(status_code=400, detail="api_url 和 api_token 不能为空")

@@ -10,6 +10,8 @@ from pydantic import BaseModel, field_validator
 from pydantic.types import SecretStr
 from dataclasses import dataclass
 
+from ..core.proxy_utils import build_proxy_url_from_components
+
 
 class SettingCategory(str, Enum):
     """设置分类"""
@@ -308,11 +310,23 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         category=SettingCategory.REGISTRATION,
         description="注册间隔最大值（秒）"
     ),
+    "registration_wait_strategy": SettingDefinition(
+        db_key="registration.wait_strategy",
+        default_value="start",
+        category=SettingCategory.REGISTRATION,
+        description="批量注册等待策略（start=启动间隔, completion=完成间隔）"
+    ),
     "registration_entry_flow": SettingDefinition(
         db_key="registration.entry_flow",
         default_value="native",
         category=SettingCategory.REGISTRATION,
         description="注册入口链路（native=原本链路, abcard=ABCard入口链路；Outlook 邮箱会自动走 Outlook 链路）"
+    ),
+    "registration_browser_sentinel_headless": SettingDefinition(
+        db_key="registration.browser_sentinel.headless",
+        default_value=True,
+        category=SettingCategory.REGISTRATION,
+        description="浏览器 Sentinel 令牌获取是否使用无头模式（容器环境下若有 XVFB 建议设为 False 以提高成功率）"
     ),
 
     # 邮箱服务配置
@@ -585,6 +599,7 @@ SETTING_TYPES: Dict[str, Type] = {
     "registration_default_password_length": int,
     "registration_sleep_min": int,
     "registration_sleep_max": int,
+    "registration_wait_strategy": str,
     "registration_entry_flow": str,
     "registration_auto_enabled": bool,
     "registration_auto_check_interval": int,
@@ -855,18 +870,14 @@ class Settings(BaseModel):
         if not self.proxy_enabled:
             return None
 
-        if self.proxy_type == "http":
-            scheme = "http"
-        elif self.proxy_type == "socks5":
-            scheme = "socks5"
-        else:
-            return None
-
-        auth = ""
-        if self.proxy_username and self.proxy_password:
-            auth = f"{self.proxy_username}:{self.proxy_password.get_secret_value()}@"
-
-        return f"{scheme}://{auth}{self.proxy_host}:{self.proxy_port}"
+        password = self.proxy_password.get_secret_value() if self.proxy_password else None
+        return build_proxy_url_from_components(
+            self.proxy_type,
+            self.proxy_host,
+            self.proxy_port,
+            self.proxy_username,
+            password,
+        )
 
     # 注册配置
     registration_max_retries: int = 3
@@ -874,6 +885,7 @@ class Settings(BaseModel):
     registration_default_password_length: int = 12
     registration_sleep_min: int = 5
     registration_sleep_max: int = 30
+    registration_wait_strategy: str = "start"
     registration_entry_flow: str = "native"
     registration_auto_enabled: bool = False
     registration_auto_check_interval: int = 60

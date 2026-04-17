@@ -65,7 +65,7 @@ def _to_response(svc) -> TmServiceResponse:
 # ============== API Endpoints ==============
 
 @router.get("", response_model=List[TmServiceResponse])
-async def list_tm_services(enabled: Optional[bool] = None):
+def list_tm_services(enabled: Optional[bool] = None):
     """获取 Team Manager 服务列表"""
     with get_db() as db:
         services = crud.get_tm_services(db, enabled=enabled)
@@ -73,7 +73,7 @@ async def list_tm_services(enabled: Optional[bool] = None):
 
 
 @router.post("", response_model=TmServiceResponse)
-async def create_tm_service(request: TmServiceCreate):
+def create_tm_service(request: TmServiceCreate):
     """新增 Team Manager 服务"""
     with get_db() as db:
         svc = crud.create_tm_service(
@@ -88,7 +88,7 @@ async def create_tm_service(request: TmServiceCreate):
 
 
 @router.get("/{service_id}", response_model=TmServiceResponse)
-async def get_tm_service(service_id: int):
+def get_tm_service(service_id: int):
     """获取单个 Team Manager 服务详情"""
     with get_db() as db:
         svc = crud.get_tm_service_by_id(db, service_id)
@@ -98,7 +98,7 @@ async def get_tm_service(service_id: int):
 
 
 @router.patch("/{service_id}", response_model=TmServiceResponse)
-async def update_tm_service(service_id: int, request: TmServiceUpdate):
+def update_tm_service(service_id: int, request: TmServiceUpdate):
     """更新 Team Manager 服务配置"""
     with get_db() as db:
         svc = crud.get_tm_service_by_id(db, service_id)
@@ -122,7 +122,7 @@ async def update_tm_service(service_id: int, request: TmServiceUpdate):
 
 
 @router.delete("/{service_id}")
-async def delete_tm_service(service_id: int):
+def delete_tm_service(service_id: int):
     """删除 Team Manager 服务"""
     with get_db() as db:
         svc = crud.get_tm_service_by_id(db, service_id)
@@ -133,7 +133,7 @@ async def delete_tm_service(service_id: int):
 
 
 @router.post("/{service_id}/test")
-async def test_tm_service(service_id: int):
+def test_tm_service(service_id: int):
     """测试 Team Manager 服务连接"""
     with get_db() as db:
         svc = crud.get_tm_service_by_id(db, service_id)
@@ -144,7 +144,7 @@ async def test_tm_service(service_id: int):
 
 
 @router.post("/test-connection")
-async def test_tm_connection_direct(request: TmTestRequest):
+def test_tm_connection_direct(request: TmTestRequest):
     """直接测试 Team Manager 连接（用于添加前验证）"""
     if not request.api_url or not request.api_key:
         raise HTTPException(status_code=400, detail="api_url 和 api_key 不能为空")

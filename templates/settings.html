@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>系统设置 - OpenAI 注册系统</title>
     <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚙️</text></svg>">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230f5ae0'/><path d='M32 18l4 3 5-1 2 5 4 3-2 5 2 5-4 3-2 5-5-1-4 3-4-3-5 1-2-5-4-3 2-5-2-5 4-3 2-5 5 1z' fill='white'/><circle cx='32' cy='32' r='7' fill='%230f5ae0'/></svg>">
     <style>
         #proxy-tab .proxy-table-container {
             max-height: 640px;
@@ -34,8 +34,8 @@
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">⚙️</a>
-            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">🌙</button>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
         </div>
         </nav>
 
@@ -48,13 +48,13 @@
 
             <!-- 设置标签页 -->
             <div class="tabs">
-                <button class="tab-btn active" data-tab="proxy">🌐 代理设置</button>
-                <button class="tab-btn" data-tab="system">🖥️ 系统设置</button>
-                <button class="tab-btn" data-tab="upload">☁️ 上传</button>
-                <button class="tab-btn" data-tab="outlook">📮 Outlook配置</button>
-                <button class="tab-btn" data-tab="registration">⚙️ 注册配置</button>
-                <button class="tab-btn" data-tab="email-code">📧 验证码配置</button>
-                <button class="tab-btn" data-tab="database">💾 数据库</button>
+                <button class="tab-btn active" data-tab="proxy">代理设置</button>
+                <button class="tab-btn" data-tab="system">系统设置</button>
+                <button class="tab-btn" data-tab="upload">上传</button>
+                <button class="tab-btn" data-tab="outlook">Outlook 配置</button>
+                <button class="tab-btn" data-tab="registration">注册配置</button>
+                <button class="tab-btn" data-tab="email-code">验证码配置</button>
+                <button class="tab-btn" data-tab="database">数据库</button>
             </div>
 
             <!-- 代理设置 -->
@@ -94,8 +94,8 @@
                                 <small style="color: var(--text-muted);">若 API 返回 JSON，填写点号分隔的字段路径提取代理 URL；留空则将响应原文作为代理 URL</small>
                             </div>
                             <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">💾 保存设置</button>
-                                <button type="button" class="btn btn-secondary" id="test-dynamic-proxy-btn">🔌 测试动态代理</button>
+                                <button type="submit" class="btn btn-primary">保存设置</button>
+                                <button type="button" class="btn btn-secondary" id="test-dynamic-proxy-btn">测试动态代理</button>
                             </div>
                         </form>
                     </div>
@@ -106,9 +106,9 @@
                     <div class="card-header">
                         <h3>代理列表</h3>
                         <div style="display: flex; gap: var(--spacing-sm);">
-                            <button class="btn btn-secondary btn-sm" id="test-all-proxies-btn">🔌 测试全部</button>
-                            <button class="btn btn-secondary btn-sm" id="proxy-batch-import-btn">📥 批量导入</button>
-                            <button class="btn btn-primary btn-sm" id="add-proxy-btn">➕ 添加代理</button>
+                            <button class="btn btn-secondary btn-sm" id="test-all-proxies-btn">测试全部</button>
+                            <button class="btn btn-secondary btn-sm" id="proxy-batch-import-btn">批量导入</button>
+                            <button class="btn btn-primary btn-sm" id="add-proxy-btn">添加代理</button>
                         </div>
                     </div>
                     <div class="card-body" style="padding: 0;">
@@ -130,7 +130,7 @@
                                     <tr>
                                         <td colspan="8">
                                             <div class="empty-state">
-                                                <div class="empty-state-icon">🌐</div>
+                                                <div class="empty-state-icon">Proxy</div>
                                                 <div class="empty-state-title">暂无代理</div>
                                                 <div class="empty-state-description">点击"添加代理"按钮添加代理服务器</div>
                                             </div>
@@ -162,7 +162,81 @@
                                 <input type="password" id="webui-access-password" name="access_password" placeholder="留空保持不变" autocomplete="new-password">
                             </div>
                             <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">💾 保存系统设置</button>
+                                <button type="submit" class="btn btn-primary">保存系统设置</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: var(--spacing-lg);">
+                    <div class="card-header">
+                        <h3>邮箱服务管理</h3>
+                        <button class="btn btn-primary btn-sm" id="add-email-service-btn">添加服务</button>
+                    </div>
+                    <div class="card-body" style="padding: 0;">
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 48px;">
+                                            <input type="checkbox" id="select-all-services">
+                                        </th>
+                                        <th>名称</th>
+                                        <th style="width: 140px;">类型</th>
+                                        <th style="width: 80px;">状态</th>
+                                        <th style="width: 80px;">优先级</th>
+                                        <th style="width: 160px;">最后使用</th>
+                                        <th style="width: 220px;">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="email-services-table">
+                                    <tr>
+                                        <td colspan="7">
+                                            <div class="empty-state">
+                                                <div class="empty-state-icon">Mail</div>
+                                                <div class="empty-state-title">暂无邮箱服务</div>
+                                                <div class="empty-state-description">点击"添加服务"创建邮箱服务</div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal" id="add-service-modal">
+                <div class="modal-content" style="max-width: 560px;">
+                    <div class="modal-header">
+                        <h3 id="service-modal-title">添加邮箱服务</h3>
+                        <button type="button" class="modal-close" id="close-service-modal">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <form id="add-service-form">
+                            <div class="form-group">
+                                <label for="service-name">名称</label>
+                                <input type="text" id="service-name" name="name" required placeholder="例如：主邮箱服务">
+                            </div>
+                            <div class="form-group">
+                                <label for="service-type">类型</label>
+                                <select id="service-type" name="service_type">
+                                    <option value="outlook">Outlook</option>
+                                    <option value="moe_mail">MoeMail</option>
+                                    <option value="tempmail">Tempmail.lol</option>
+                                    <option value="yyds_mail">YYDS Mail</option>
+                                    <option value="temp_mail">TempMail</option>
+                                    <option value="cloudmail">CloudMail</option>
+                                    <option value="duck_mail">DuckMail</option>
+                                    <option value="luckmail">LuckMail</option>
+                                    <option value="freemail">Freemail</option>
+                                    <option value="imap_mail">IMAP</option>
+                                </select>
+                            </div>
+                            <div id="service-config-fields"></div>
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">保存</button>
+                                <button type="button" class="btn btn-secondary" id="cancel-add-service">取消</button>
                             </div>
                         </form>
                     </div>
@@ -212,7 +286,7 @@
                             </div>
                             <div class="form-actions">
                                 <button type="button" class="btn btn-secondary" id="cancel-proxy-btn">取消</button>
-                                <button type="submit" class="btn btn-primary">💾 保存</button>
+                                <button type="submit" class="btn btn-primary">保存</button>
                             </div>
                         </form>
                     </div>
@@ -275,7 +349,7 @@ user:pass@127.0.0.1:7890
                 <!-- CPA 服务管理 -->
                 <div class="card" style="margin-top: var(--spacing-lg);">
                     <div class="card-header">
-                        <h3>☁️ CPA 服务</h3>
+                        <h3>CPA 服务</h3>
                         <button class="btn btn-primary btn-sm" id="add-cpa-service-btn">+ 添加服务</button>
                     </div>
                     <div class="card-body" style="padding: 0;">
@@ -302,7 +376,7 @@ user:pass@127.0.0.1:7890
                 <!-- Sub2API 服务管理 -->
                 <div class="card" style="margin-top: var(--spacing-lg);">
                     <div class="card-header">
-                        <h3>🔗 Sub2API 服务</h3>
+                        <h3>Sub2API 服务</h3>
                         <button class="btn btn-primary btn-sm" id="add-sub2api-service-btn">+ 添加服务</button>
                     </div>
                     <div class="card-body" style="padding: 0;">
@@ -329,7 +403,7 @@ user:pass@127.0.0.1:7890
                 <!-- Team Manager 服务管理 -->
                 <div class="card" style="margin-top: var(--spacing-lg);">
                     <div class="card-header">
-                        <h3>🚀 Team Manager 服务</h3>
+                        <h3>Team Manager 服务</h3>
                         <button class="btn btn-primary btn-sm" id="add-tm-service-btn">+ 添加服务</button>
                     </div>
                     <div class="card-body" style="padding: 0;">
@@ -414,7 +488,7 @@ user:pass@127.0.0.1:7890
                                 </div>
                             </div>
                             <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">💾 保存</button>
+                                <button type="submit" class="btn btn-primary">保存</button>
                                 <button type="button" class="btn btn-secondary" id="test-tm-service-btn">🔌 测试连接</button>
                                 <button type="button" class="btn btn-secondary" id="cancel-tm-service-btn">取消</button>
                             </div>
@@ -462,7 +536,7 @@ user:pass@127.0.0.1:7890
                                 </div>
                             </div>
                             <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">💾 保存</button>
+                                <button type="submit" class="btn btn-primary">保存</button>
                                 <button type="button" class="btn btn-secondary" id="test-new-api-service-btn">🔌 测试连接</button>
                                 <button type="button" class="btn btn-secondary" id="cancel-new-api-service-btn">取消</button>
                             </div>
@@ -514,7 +588,7 @@ user:pass@127.0.0.1:7890
                                 </div>
                             </div>
                             <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">💾 保存</button>
+                                <button type="submit" class="btn btn-primary">保存</button>
                                 <button type="button" class="btn btn-secondary" id="test-sub2api-service-btn">🔌 测试连接</button>
                                 <button type="button" class="btn btn-secondary" id="cancel-sub2api-service-btn">取消</button>
                             </div>
@@ -565,7 +639,7 @@ user:pass@127.0.0.1:7890
                                 </div>
                             </div>
                             <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">💾 保存</button>
+                                <button type="submit" class="btn btn-primary">保存</button>
                                 <button type="button" class="btn btn-secondary" id="test-cpa-service-btn">🔌 测试连接</button>
                                 <button type="button" class="btn btn-secondary" id="cancel-cpa-service-btn">取消</button>
                             </div>
@@ -591,7 +665,7 @@ user:pass@127.0.0.1:7890
                             </div>
 
                             <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">💾 保存设置</button>
+                                <button type="submit" class="btn btn-primary">保存设置</button>
                             </div>
                         </form>
                     </div>
@@ -636,6 +710,18 @@ user:pass@127.0.0.1:7890
 
                             <div class="form-row">
                                 <div class="form-group">
+                                    <label for="registration-wait-strategy">批量等待策略</label>
+                                    <select id="registration-wait-strategy" name="wait_strategy">
+                                        <option value="start">启动间隔</option>
+                                        <option value="completion">完成间隔</option>
+                                    </select>
+                                    <span class="hint">启动间隔会在启动新任务前等待；完成间隔会在前一任务完成后等待再复用并发槽</span>
+                                    <div id="registration-wait-strategy-status" class="hint" style="margin-top: 8px;"></div>
+                                </div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
                                     <label for="sleep-min">最小等待时间 (秒)</label>
                                     <input type="number" id="sleep-min" name="sleep_min" value="5" min="1" max="60">
                                 </div>
@@ -647,7 +733,7 @@ user:pass@127.0.0.1:7890
                             </div>
 
                             <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">💾 保存设置</button>
+                                <button type="submit" class="btn btn-primary">保存设置</button>
                             </div>
                         </form>
                     </div>
@@ -678,7 +764,7 @@ user:pass@127.0.0.1:7890
                             </div>
 
                             <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">💾 保存设置</button>
+                                <button type="submit" class="btn btn-primary">保存设置</button>
                             </div>
                         </form>
                     </div>
@@ -727,7 +813,7 @@ user:pass@127.0.0.1:7890
                         </div>
 
                         <div class="form-actions">
-                            <button class="btn btn-secondary" id="backup-btn">💾 备份数据库</button>
+                            <button class="btn btn-secondary" id="backup-btn">备份数据库</button>
                             <button class="btn btn-primary" id="import-db-btn">📥 导入数据</button>
                             <button class="btn btn-warning" id="cleanup-btn">🧹 清理过期数据</button>
                             <input type="file" id="db-import-file" accept=".db,.sqlite,.sqlite3" style="display: none;">
@@ -743,7 +829,3 @@ user:pass@127.0.0.1:7890
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
-
-
-

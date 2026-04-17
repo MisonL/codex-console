@@ -23,3 +23,40 @@
         </div>
     </div>
 </footer>
+
+<!-- 全局任务监控中心 -->
+<div id="global-task-container" class="global-task-container"></div>
+
+<!-- 任务详情模态框 -->
+<div class="modal" id="task-detail-modal">
+    <div class="modal-content task-detail-modal-content">
+        <div class="modal-header">
+            <h3 id="task-detail-title">任务详情</h3>
+            <div class="modal-header-actions">
+                <button class="btn btn-ghost btn-sm" id="task-detail-clear-logs">清空日志</button>
+                <button class="modal-close" type="button" data-modal-close="task-detail-modal">x</button>
+            </div>
+        </div>
+        <div class="modal-body">
+            <div class="task-detail-layout">
+                <aside class="task-detail-sidebar">
+                    <div class="task-detail-stats-grid" id="task-detail-stats">
+                        <!-- 动态填充统计数据 -->
+                    </div>
+                    <div class="task-detail-info">
+                        <p><strong>任务 ID:</strong> <span id="task-detail-id">-</span></p>
+                        <p><strong>状态:</strong> <span id="task-detail-status">-</span></p>
+                        <p><strong>耗时:</strong> <span id="task-detail-duration">-</span></p>
+                    </div>
+                    <div class="task-detail-actions" style="margin-top: auto;">
+                        <button class="btn btn-danger btn-block" id="task-detail-cancel-btn">取消任务</button>
+                    </div>
+                </aside>
+                <main class="task-detail-logs" id="task-detail-logs">
+                    <!-- 动态填充日志流 -->
+                </main>
+            </div>
+        </div>
+    </div>
+</div>
+

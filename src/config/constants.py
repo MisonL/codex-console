@@ -34,6 +34,12 @@ class RoleTag(str, Enum):
     CHILD = "child"
 
 
+class RegistrationWaitStrategy(str, Enum):
+    """批量注册等待策略"""
+    START = "start"
+    COMPLETION = "completion"
+
+
 class PoolState(str, Enum):
     """账号池状态"""
     TEAM_POOL = "team_pool"
@@ -84,6 +90,14 @@ def normalize_role_tag(value: str) -> str:
     return RoleTag.NONE.value
 
 
+def normalize_registration_wait_strategy(value: str) -> str:
+    """标准化批量等待策略，未知值降级为 start。"""
+    text = str(value or "").strip().lower()
+    if text == RegistrationWaitStrategy.COMPLETION.value:
+        return RegistrationWaitStrategy.COMPLETION.value
+    return RegistrationWaitStrategy.START.value
+
+
 def normalize_pool_state(value: str) -> str:
     """标准化池状态，未知值降级为 candidate_pool。"""
     text = str(value or "").strip().lower()
@@ -132,6 +146,9 @@ OAUTH_AUTH_URL = "https://auth.openai.com/oauth/authorize"
 OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
 OAUTH_SCOPE = "openid email profile offline_access"
+CODEX_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
+CODEX_OAUTH_SCOPE = "openid profile email offline_access api.connectors.read api.connectors.invoke"
+CODEX_OAUTH_ORIGINATOR = "codex_cli_rs"
 
 # OpenAI API 端点
 OPENAI_API_ENDPOINTS = {

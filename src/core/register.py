@@ -10,15 +10,24 @@ import logging
 import secrets
 import string
 import uuid
+import os
 from typing import Optional, Dict, Any, Tuple, Callable, List
 from dataclasses import dataclass
 from datetime import datetime
 
 from curl_cffi import requests as cffi_requests
 
+from .anyauto.access_token_only_registration_engine import AccessTokenOnlyRegistrationEngine
 from .anyauto.register_flow import AnyAutoRegistrationEngine
+from .anyauto.registration_mode import (
+    CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
+    CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
+    resolve_chatgpt_registration_mode,
+)
 from .openai.oauth import OAuthManager, OAuthStart
+from .openai.sentinel_browser import BrowserSentinelError, fetch_browser_sentinel_artifacts
 from .http_client import OpenAIHTTPClient, HTTPClientError
+from .proxy_utils import normalize_proxy_url
 from ..services import EmailServiceFactory, BaseEmailService, EmailServiceType
 from ..database import crud
 from ..database.session import get_db
@@ -98,7 +107,8 @@ class RegistrationEngine:
         email_service: BaseEmailService,
         proxy_url: Optional[str] = None,
         callback_logger: Optional[Callable[[str], None]] = None,
-        task_uuid: Optional[str] = None
+        task_uuid: Optional[str] = None,
+        refresh_token_enabled: bool = True,
     ):
         """
         初始化注册引擎
@@ -110,9 +120,13 @@ class RegistrationEngine:
             task_uuid: 任务 UUID（用于数据库记录）
         """
         self.email_service = email_service
-        self.proxy_url = proxy_url
+        self.proxy_url = normalize_proxy_url(proxy_url)
         self.callback_logger = callback_logger or (lambda msg: logger.info(msg))
         self.task_uuid = task_uuid
+        self.refresh_token_enabled = bool(refresh_token_enabled)
+        self.chatgpt_registration_mode = resolve_chatgpt_registration_mode(
+            refresh_token_enabled=self.refresh_token_enabled,
+        )
 
         # 创建 HTTP 客户端
         self.http_client = OpenAIHTTPClient(proxy_url=proxy_url)
@@ -151,6 +165,7 @@ class RegistrationEngine:
         self._last_validate_otp_continue_url: Optional[str] = None
         self._last_validate_otp_workspace_id: Optional[str] = None
         self._last_register_password_error: Optional[str] = None
+        self._last_register_password_request_id: Optional[str] = None
         self._last_otp_validation_code: Optional[str] = None
         self._last_otp_validation_status_code: Optional[int] = None
         self._last_otp_validation_outcome: str = ""  # success/http_non_200/network_timeout/network_error
@@ -166,14 +181,6 @@ class RegistrationEngine:
         # 调用回调函数
         if self.callback_logger:
             self.callback_logger(log_message)
-
-        # 记录到数据库（如果有关联任务）
-        if self.task_uuid:
-            try:
-                with get_db() as db:
-                    crud.append_task_log(db, self.task_uuid, log_message)
-            except Exception as e:
-                logger.warning(f"记录任务日志失败: {e}")
 
         # 根据级别记录到日志系统
         if level == "error":
@@ -488,6 +495,81 @@ class RegistrationEngine:
             self._log(f"Sentinel 检查异常: {e}", "warning")
             return None
 
+    @staticmethod
+    def _build_sentinel_header_value(did: Optional[str], sen_token: Optional[str]) -> Optional[str]:
+        """标准化 openai-sentinel-token 请求头。"""
+        token_text = str(sen_token or "").strip()
+        if not token_text:
+            return None
+        if token_text.startswith("{"):
+            return token_text
+        device_id = str(did or "").strip()
+        return json.dumps(
+            {
+                "p": "",
+                "t": "",
+                "c": token_text,
+                "id": device_id,
+                "flow": "authorize_continue",
+            },
+            separators=(",", ":"),
+        )
+
+    def _browser_sentinel_headless(self) -> bool:
+        """决定是否使用无头模式获取 Sentinel 令牌。"""
+        settings = get_settings()
+        force_headless = getattr(settings, "registration_browser_sentinel_headless", None)
+        if force_headless is False:
+            return False
+        if force_headless is True:
+            return True
+        
+        # 智能判定：有显示环境则用有头模式（提高成功率，规避 CF Just a moment）
+        import os
+        has_display = bool(os.environ.get("DISPLAY"))
+        return not has_display
+
+    def _current_browser_identity(self) -> tuple[str, str]:
+        session_headers = getattr(self.session, "headers", None)
+        user_agent = ""
+        accept_language = ""
+        if session_headers:
+            try:
+                user_agent = str(session_headers.get("User-Agent") or "").strip()
+                accept_language = str(session_headers.get("Accept-Language") or "").strip()
+            except Exception:
+                user_agent = ""
+                accept_language = ""
+        if not user_agent:
+            user_agent = str(self.http_client.default_headers.get("User-Agent") or "").strip()
+        if not accept_language:
+            accept_language = str(self.http_client.default_headers.get("Accept-Language") or "").strip()
+        return user_agent, accept_language
+
+    def _fetch_browser_sentinel_artifacts(
+        self,
+        *,
+        flow: str,
+        page_url: str,
+        include_session_observer: bool = False,
+        include_passkey_capabilities: bool = False,
+    ):
+        resolved_did = str(self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
+        if not resolved_did:
+            raise BrowserSentinelError("missing oai-did for browser sentinel flow")
+        user_agent, accept_language = self._current_browser_identity()
+        return fetch_browser_sentinel_artifacts(
+            flow=flow,
+            device_id=resolved_did,
+            page_url=page_url,
+            proxy=self.proxy_url,
+            user_agent=user_agent,
+            accept_language=accept_language,
+            include_session_observer=include_session_observer,
+            include_passkey_capabilities=include_passkey_capabilities,
+            headless=self._browser_sentinel_headless(),
+        )
+
     def _submit_auth_start(
         self,
         did: str,
@@ -523,15 +605,11 @@ class RegistrationEngine:
                     "content-type": "application/json",
                 }
 
-                if current_sen_token:
-                    sentinel = json.dumps({
-                        "p": "",
-                        "t": "",
-                        "c": current_sen_token,
-                        "id": current_did,
-                        "flow": "authorize_continue",
-                    })
-                    headers["openai-sentinel-token"] = sentinel
+                sentinel_header = self._build_sentinel_header_value(current_did, current_sen_token)
+                if current_did:
+                    headers["oai-device-id"] = current_did
+                if sentinel_header:
+                    headers["openai-sentinel-token"] = sentinel_header
 
                 response = self.session.post(
                     OPENAI_API_ENDPOINTS["signup"],
@@ -673,12 +751,35 @@ class RegistrationEngine:
 
         for attempt in range(1, max_attempts + 1):
             try:
+                did = str(self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
+                
+                sentinel_header = None
+                try:
+                    from .openai.sentinel_token_v2 import build_sentinel_token
+                    user_agent, _ = self._current_browser_identity()
+                    sentinel_header = build_sentinel_token(self.session, did, flow="password_verify", user_agent=user_agent)
+                except Exception as e:
+                    self._log(f"构建 Sentinel Token (纯 Python) 失败: {e}", "warning")
+
+                if not sentinel_header:
+                    try:
+                        sentinel = self._fetch_browser_sentinel_artifacts(
+                            flow="password_verify",
+                            page_url="https://auth.openai.com/log-in/password",
+                        )
+                        sentinel_header = self._build_sentinel_header_value(did, sentinel.token)
+                    except Exception:
+                        pass
+
                 response = self.session.post(
                     OPENAI_API_ENDPOINTS["password_verify"],
                     headers={
                         "referer": "https://auth.openai.com/log-in/password",
+                        "origin": "https://auth.openai.com",
                         "accept": "application/json",
                         "content-type": "application/json",
+                        "oai-device-id": did,
+                        "OpenAI-Sentinel-Token": sentinel_header or "",
                     },
                     data=json.dumps({"password": self.password}),
                 )
@@ -1990,10 +2091,38 @@ class RegistrationEngine:
         """注册密码"""
         try:
             self._last_register_password_error = None
+            self._last_register_password_request_id = None
             # 生成密码
             password = self._generate_password()
             self.password = password  # 保存密码到实例变量
             self._log(f"生成密码: {password}")
+
+            resolved_did = str(did or self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
+            
+            sentinel = None
+            try:
+                from .openai.sentinel_token_v2 import build_sentinel_token
+                user_agent, _ = self._current_browser_identity()
+                sentinel_header = build_sentinel_token(self.session, resolved_did, flow="username_password_create", user_agent=user_agent)
+                if sentinel_header:
+                    self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            except Exception as e:
+                self._log(f"构建 Sentinel Token (纯 Python) 失败: {e}", "warning")
+                sentinel_header = None
+
+            if not sentinel_header:
+                # 降级方案：使用之前的 Browser 获取
+                try:
+                    sentinel = self._fetch_browser_sentinel_artifacts(
+                        flow="username_password_create",
+                        page_url="https://auth.openai.com/create-account/password",
+                    )
+                    sentinel_header = self._build_sentinel_header_value(resolved_did, sentinel.token)
+                except Exception as e:
+                    self._log(f"Browser Sentinel 兜底失败: {e}", "warning")
+
+            if not sentinel_header:
+                raise BrowserSentinelError("empty browser sentinel header for register")
 
             # 提交密码注册
             register_body = json.dumps({
@@ -2001,17 +2130,26 @@ class RegistrationEngine:
                 "username": self.email
             })
 
+            resolved_did = str(did or self.device_id or self.session.cookies.get("oai-did") or "").strip()
+            headers = {
+                "referer": "https://auth.openai.com/create-account/password",
+                "origin": "https://auth.openai.com",
+                "accept": "application/json",
+                "content-type": "application/json",
+                "oai-device-id": resolved_did,
+                "OpenAI-Sentinel-Token": sentinel_header,
+            }
+
             response = self.session.post(
                 OPENAI_API_ENDPOINTS["register"],
-                headers={
-                    "referer": "https://auth.openai.com/create-account/password",
-                    "accept": "application/json",
-                    "content-type": "application/json",
-                },
+                headers=headers,
                 data=register_body,
             )
+            self._last_register_password_request_id = str(response.headers.get("x-request-id") or "").strip() or None
 
             self._log(f"提交密码状态: {response.status_code}")
+            if self._last_register_password_request_id:
+                self._log(f"注册密码请求 ID: {self._last_register_password_request_id}")
 
             if response.status_code != 200:
                 error_text = response.text[:500]
@@ -2052,6 +2190,14 @@ class RegistrationEngine:
                                     )
                             except Exception as probe_error:
                                 self._log(f"登录入口探测失败: {probe_error}", "warning")
+                    elif normalized_error_code == "registration_disallowed":
+                        self._last_register_password_error = (
+                            "OpenAI 拒绝当前注册请求（registration_disallowed），当前邮箱/IP/指纹组合不允许继续创建账号"
+                        )
+                    elif "cannot create your account with the given information" in normalized_error_msg.lower():
+                        self._last_register_password_error = (
+                            "OpenAI 拒绝当前注册请求，当前邮箱/IP/指纹组合不允许继续创建账号"
+                        )
                     else:
                         self._last_register_password_error = (
                             f"注册密码接口返回异常: {normalized_error_msg or f'HTTP {response.status_code}'}"
@@ -2068,6 +2214,16 @@ class RegistrationEngine:
             self._last_register_password_error = str(e)
             return False, None
 
+    def _build_register_password_environment_rejection(self, request_id: Optional[str] = None) -> str:
+        message = (
+            "OpenAI 在 create-account/password 阶段连续拒绝当前注册请求，"
+            "当前出口 IP / 设备指纹 / 会话环境很可能触发风控"
+        )
+        resolved_request_id = str(request_id or getattr(self, "_last_register_password_request_id", "") or "").strip()
+        if resolved_request_id:
+            return f"{message}（x-request-id: {resolved_request_id}）"
+        return message
+
     def _register_password_with_retry(
         self,
         did: Optional[str] = None,
@@ -2075,29 +2231,56 @@ class RegistrationEngine:
     ) -> Tuple[bool, Optional[str]]:
         """Retry password registration when OpenAI returns a generic recoverable 400."""
         max_attempts = 3
+        current_did = str(did or getattr(self, "device_id", None) or "").strip()
+        current_sen_token = str(sen_token or "").strip() if sen_token else None
+        non_retryable_markers = (
+            "registration_disallowed",
+            "cannot create your account with the given information",
+            "不允许继续创建账号",
+        )
         retryable_markers = (
             "failed to create account",
             "create account",
             "invalid_request_error",
             "http 400",
         )
+        generic_create_account_failures = 0
 
         for attempt in range(1, max_attempts + 1):
-            success, password = self._register_password(did, sen_token)
+            success, password = self._register_password(current_did, current_sen_token)
             if success:
                 return True, password
 
             error_text = str(self._last_register_password_error or "").strip().lower()
+            is_generic_create_account_failure = (
+                "failed to create account" in error_text
+                and not any(marker in error_text for marker in non_retryable_markers)
+            )
+            if is_generic_create_account_failure:
+                generic_create_account_failures += 1
+            if any(marker in error_text for marker in non_retryable_markers):
+                break
             if attempt >= max_attempts:
                 break
             if not any(marker in error_text for marker in retryable_markers):
                 break
 
+            if current_did:
+                try:
+                    refreshed = self._check_sentinel(current_did)
+                    if refreshed:
+                        current_sen_token = refreshed
+                except Exception:
+                    pass
             self._log(
                 f"密码注册命中可重试 400，准备重新生成密码后重试 ({attempt}/{max_attempts})...",
                 "warning",
             )
             time.sleep(min(2 * attempt, 4))
+
+        if generic_create_account_failures >= max_attempts:
+            self._last_register_password_error = self._build_register_password_environment_rejection()
+            self._log(self._last_register_password_error, "error")
 
         return False, None
 
@@ -2334,14 +2517,47 @@ class RegistrationEngine:
             user_info = generate_random_user_info()
             self._log(f"生成用户信息: {user_info['name']}, 生日: {user_info['birthdate']}")
             create_account_body = json.dumps(user_info)
+            resolved_did = str(self.device_id or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did") or "").strip()
+            
+            sentinel = None
+            try:
+                from .openai.sentinel_token_v2 import build_sentinel_token
+                user_agent, _ = self._current_browser_identity()
+                sentinel_header = build_sentinel_token(self.session, resolved_did, flow="oauth_create_account", user_agent=user_agent)
+                if sentinel_header:
+                    self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            except Exception as e:
+                self._log(f"构建 Sentinel Token (纯 Python) 失败: {e}", "warning")
+                sentinel_header = None
+
+            if not sentinel_header:
+                try:
+                    sentinel = self._fetch_browser_sentinel_artifacts(
+                        flow="oauth_create_account",
+                        page_url="https://auth.openai.com/about-you",
+                        include_session_observer=True,
+                    )
+                    sentinel_header = self._build_sentinel_header_value(resolved_did, sentinel.token)
+                except Exception as e:
+                    self._log(f"Browser Sentinel 兜底失败: {e}", "warning")
+
+            if not sentinel_header:
+                raise BrowserSentinelError("empty browser sentinel header for create_account")
+
+            headers = {
+                "referer": "https://auth.openai.com/about-you",
+                "origin": "https://auth.openai.com",
+                "accept": "application/json",
+                "content-type": "application/json",
+                "oai-device-id": resolved_did,
+                "OpenAI-Sentinel-Token": sentinel_header,
+            }
+            if sentinel and getattr(sentinel, 'session_observer_token', None):
+                headers["OpenAI-Sentinel-SO-Token"] = sentinel.session_observer_token
 
             response = self.session.post(
                 OPENAI_API_ENDPOINTS["create_account"],
-                headers={
-                    "referer": "https://auth.openai.com/about-you",
-                    "accept": "application/json",
-                    "content-type": "application/json",
-                },
+                headers=headers,
                 data=create_account_body,
             )
 
@@ -2687,6 +2903,14 @@ class RegistrationEngine:
             self._log("注册流程启动，开始替你敲门")
             self._log("=" * 60)
             self._log(f"注册入口链路配置: {self.registration_entry_flow}")
+            self._log(
+                "ChatGPT 注册模式: "
+                + (
+                    "有 RT / 新 PR 链路"
+                    if self.chatgpt_registration_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN
+                    else "无 RT / AccessTokenOnly 兼容链路"
+                )
+            )
             configured_entry_flow = self.registration_entry_flow
             service_type_raw = getattr(self.email_service, "service_type", "")
             service_type_value = str(getattr(service_type_raw, "value", service_type_raw) or "").strip().lower()
@@ -2694,6 +2918,14 @@ class RegistrationEngine:
             if service_type_value == "outlook":
                 self._log("检测到 Outlook 邮箱，自动使用 Outlook 入口链路（无需在设置中选择）")
                 effective_entry_flow = "outlook"
+
+            # 针对 native 和 abcard 模式，直接调用已经优化的 AnyAuto 引擎（PR60 架构）
+            # 该引擎处理 OAuth 回调逻辑更稳健，能避免二次登录触发验证码。
+            if effective_entry_flow in {"native", "abcard"}:
+                self._log(
+                    f"正在切换至 AnyAuto 引擎执行 {effective_entry_flow} 链路，模式={self.chatgpt_registration_mode} ..."
+                )
+                return self._run_anyauto_fallback()
 
             # 1. 检查 IP 地理位置
             self._log("1. 先看看这条网络从哪儿来，别一开局就站错片场...")
@@ -2804,6 +3036,8 @@ class RegistrationEngine:
                 "has_refresh_token": bool(result.refresh_token),
                 "registration_entry_flow": configured_entry_flow,
                 "registration_entry_flow_effective": effective_entry_flow,
+                "chatgpt_registration_mode": self.chatgpt_registration_mode,
+                "chatgpt_has_refresh_token_solution": self.chatgpt_registration_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
                 # 对齐 K:\1\2：原生入口允许无 session_token 成功，但会标记待补。
                 "session_token_pending": (effective_entry_flow == "native") and (not bool(result.session_token)),
             }
@@ -2819,9 +3053,17 @@ class RegistrationEngine:
         self,
         flow_result: Optional[Dict[str, Any]],
         primary_error: str = "",
+        mode: Optional[str] = None,
+        flow_label: Optional[str] = None,
     ) -> RegistrationResult:
         """Map PR60 AnyAuto V2 output into the current RegistrationResult structure."""
         result = RegistrationResult(success=False, logs=self.logs)
+        resolved_mode = mode or getattr(self, "chatgpt_registration_mode", CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN)
+        resolved_flow_label = flow_label or (
+            "any-auto-register-refresh-token"
+            if resolved_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN
+            else "any-auto-register-access-token-only"
+        )
         result.email = str(self.email or "")
         result.password = str(self.password or "")
         result.device_id = str(self.device_id or "")
@@ -2833,10 +3075,12 @@ class RegistrationEngine:
             else:
                 result.error_message = fallback_error or primary_error or "注册失败"
             result.metadata = {
-                "registration_flow": "any-auto-register-fallback",
-                "fallback_attempted": True,
+                "registration_flow": resolved_flow_label,
+                "fallback_attempted": False,
                 "primary_error": primary_error,
                 "fallback_success": False,
+                "chatgpt_registration_mode": resolved_mode,
+                "chatgpt_has_refresh_token_solution": resolved_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
             }
             return result
 
@@ -2871,34 +3115,46 @@ class RegistrationEngine:
                 "email_service": self.email_service.service_type.value,
                 "proxy_used": self.proxy_url,
                 "registered_at": datetime.now().isoformat(),
-                "registration_flow": "any-auto-register-fallback",
-                "fallback_attempted": True,
+                "registration_flow": resolved_flow_label,
+                "fallback_attempted": False,
                 "primary_error": primary_error,
                 "client_id": client_id,
                 "device_id": result.device_id,
                 "has_session_token": bool(result.session_token),
                 "has_access_token": bool(result.access_token),
                 "has_refresh_token": bool(result.refresh_token),
+                "chatgpt_registration_mode": resolved_mode,
+                "chatgpt_has_refresh_token_solution": resolved_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
             }
         )
         result.metadata = metadata
         return result
 
     def _run_anyauto_fallback(self, primary_error: str = "") -> RegistrationResult:
-        """Run the PR60 AnyAuto V2 engine as a controlled fallback."""
+        """Run the requested AnyAuto engine."""
         settings = get_settings()
         max_retries = int(getattr(settings, "registration_max_retries", 3) or 3)
         browser_mode = str(
             getattr(settings, "registration_anyauto_browser_mode", "protocol") or "protocol"
         ).strip()
-
-        flow_engine = AnyAutoRegistrationEngine(
+        requested_mode = getattr(self, "chatgpt_registration_mode", CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN)
+        flow_engine_cls = (
+            AccessTokenOnlyRegistrationEngine
+            if requested_mode == CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY
+            else AnyAutoRegistrationEngine
+        )
+        flow_engine = flow_engine_cls(
             email_service=self.email_service,
             proxy_url=self.proxy_url,
             callback_logger=self._log,
             max_retries=max_retries,
             browser_mode=browser_mode or "protocol",
-            extra_config=None,
+            extra_config={
+                "default_password_length": int(
+                    getattr(settings, "registration_default_password_length", DEFAULT_PASSWORD_LENGTH)
+                    or DEFAULT_PASSWORD_LENGTH
+                ),
+            },
         )
         flow_result = flow_engine.run()
 
@@ -2909,7 +3165,11 @@ class RegistrationEngine:
         self.session = flow_engine.session
         self.device_id = flow_engine.device_id
 
-        fallback_result = self._build_anyauto_fallback_result(flow_result, primary_error=primary_error)
+        fallback_result = self._build_anyauto_fallback_result(
+            flow_result,
+            primary_error=primary_error,
+            mode=requested_mode,
+        )
         if fallback_result.session_token:
             self.session_token = fallback_result.session_token
         return fallback_result
@@ -2956,7 +3216,11 @@ class RegistrationEngine:
         return any(marker in error_text for marker in retryable_markers)
 
     def run(self) -> RegistrationResult:
-        """Run the current primary flow first, then selectively fall back to PR60 AnyAuto V2."""
+        """Run the anyauto V2 directly for native/abcard, or primary flow with fallback."""
+        if self.registration_entry_flow in {"native", "abcard"}:
+            self._log(f"检测到 {self.registration_entry_flow} 注册流程，全面启用 anyauto 引擎接管...", "info")
+            return self._run_anyauto_fallback(primary_error="Direct anyauto takeover for native/abcard")
+
         primary_result = self._run_primary_registration()
         if primary_result.success:
             return primary_result
@@ -2995,6 +3259,15 @@ class RegistrationEngine:
         try:
             # 获取默认 client_id
             settings = get_settings()
+            cookie_text = self._dump_session_cookies()
+            if (not result.session_token) and cookie_text:
+                result.session_token = self._extract_session_token_from_cookie_text(cookie_text)
+            if not result.account_id and result.access_token:
+                result.account_id = self._extract_account_id_from_access_token(result.access_token)
+            if not result.workspace_id:
+                result.workspace_id = str(self._get_workspace_id() or result.account_id or "").strip()
+            if (not result.account_id) and result.workspace_id:
+                result.account_id = str(result.workspace_id or "").strip()
 
             with get_db() as db:
                 # 保存账户信息
@@ -3004,7 +3277,7 @@ class RegistrationEngine:
                     password=result.password,
                     client_id=settings.openai_client_id,
                     session_token=result.session_token,
-                    cookies=self._dump_session_cookies(),
+                    cookies=cookie_text,
                     email_service=self.email_service.service_type.value,
                     email_service_id=self.email_info.get("service_id") if self.email_info else None,
                     account_id=result.account_id,

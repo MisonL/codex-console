@@ -181,11 +181,50 @@
 
 - Web UI 管理注册任务、账号、支付、自检、邮箱服务、卡池、Auto Team 和日志数据
 - 支持单任务、批量任务、自动补货、计划任务、任务暂停 / 继续 / 取消 / 重试
+- 账号管理页支持异步批量刷新 Token、批量验证、批量检测订阅、账号总览刷新和任务状态轮询
+- 账号管理页提供独立的 `Codex Auth` 工作台，可对残缺账号执行审计、严格修复、标准 `auth.json` 生成和 ZIP 导出
 - 支持多种邮箱服务接码和自部署邮箱接入
 - 支持 CPA、Sub2API、Team Manager、New-API 等上传链路
 - 支持 SQLite 和远程 PostgreSQL
 - 支持打包为 Windows / Linux / macOS 可执行文件
 - 更适配当前 OpenAI 注册与登录链路
+
+## ChatGPT 注册模式
+
+注册页和计划任务配置里的 `refresh_token_enabled` 用来切换两条收口链路：
+
+- `有 RT`：优先走 `Refresh Token` 方案。注册成功后会继续尝试 `callback -> session 复用 -> OAuth/passwordless 接力`，目标是落库 `access_token + refresh_token + session_token`。
+- `无 RT`：走 `Access Token Only` 兼容方案。注册成功后只要求会话复用拿到 `access_token` / `session_token`，不再把 `refresh_token` 作为成功门槛。
+
+使用建议：
+
+- 需要后续稳定续期、导出完整 OAuth 凭据时，使用 `有 RT`。
+- 只要求当前会话可用、允许后续人工补 OAuth 时，使用 `无 RT`。
+
+两种模式都会把最终模式写入账号 `extra_data`，字段包括 `chatgpt_registration_mode`、`chatgpt_has_refresh_token_solution`、`has_refresh_token` 等，便于后续排查。
+
+## WebSocket 实时日志机制
+
+注册页实时日志使用 `/api/ws/task/{task_uuid}` 和 `/api/ws/batch/{batch_id}` 两条 WebSocket 通道：
+
+- 任务创建后，前端优先建立 WebSocket 监听，不再依赖高频轮询拿日志。
+- 新连接会先收到当前状态，再补发该任务已存在的历史日志；后续日志由后台事件队列实时广播。
+- 单任务和批量任务都支持断线重连，前端按消息内容做去重，避免页面跳转或网络抖动后日志断档。
+- 批量取消会同时标记批次状态和子任务取消请求，自动补货场景也会同步更新监控面板状态。
+
+## 账号管理页补充说明
+
+当前 `账号管理` 页除了基础账号表，还包含几组已经落地的运维能力：
+
+- `刷新Token`、`验证Token`、`检测订阅`、`总览刷新` 均已改为异步任务模式，支持进度、暂停、继续、取消和结果轮询。
+- 三个批量动作按钮使用悬浮说明气泡，按钮空闲文案保持稳定，不再随勾选数量来回变更。
+- 账号表新增 `Codex Auth` 状态列，可直接看到 `健康`、`可修复`、`受阻`、`缺条件` 等状态。
+- 工具栏中的 `Codex Auth` 会打开独立工作台，而不是把修复动作和日常账号运维按钮混在一起。
+- 工作台内支持四个动作：
+  - `批量审计`：严格探测账号是否还能走完整 Codex Auth 链路。
+  - `批量修复`：只在拿到完整 token bundle 后才判定修复成功。
+  - `批量生成`：为已完整账号生成标准 managed `auth.json`。
+  - `批量导出`：导出兼容官方 Codex 和 `codex-auth` 的 ZIP。
 
 ## 环境要求
 
@@ -195,12 +234,17 @@
 ## 安装依赖
 
 ```bash
-# 使用 uv（推荐）
-uv sync
-
-# 或使用 pip
+# 运行环境建议直接安装 requirements.txt
 pip install -r requirements.txt
+
+# 使用 uv 做本地开发 / 测试
+uv sync --extra dev
 ```
+
+说明：
+
+- `requirements.txt` 目前覆盖运行所需完整依赖，适合直接启动服务。
+- `uv sync --extra dev` 适合本地维护、测试和补充开发依赖。
 
 ## 环境变量配置
 
@@ -257,6 +301,19 @@ codex-console.exe --access-password mypassword
 启动后访问：
 
 [http://127.0.0.1:8000](http://127.0.0.1:8000)
+
+## 最小验证命令
+
+```bash
+# Python 路由与核心模块语法检查
+python3 -m py_compile src/web/routes/accounts.py src/web/routes/payment.py src/core/openai/codex_auth_workbench.py
+
+# 前端脚本语法检查
+node --check static/js/accounts.js
+
+# 账号管理与 Codex Auth 相关测试
+uv run python -m pytest -q tests/test_codex_auth_workbench.py tests/test_security_and_task_routes.py
+```
 
 ## Docker 部署
 

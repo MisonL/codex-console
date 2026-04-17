@@ -141,6 +141,8 @@ def create_app() -> FastAPI:
                 register_auto_registration_coordinator(None)
                 auto_registration_coordinator = None
 
+            await task_manager.shutdown()
+
             logger.info("Application stopped")
 
     app = FastAPI(

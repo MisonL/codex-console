@@ -15,6 +15,7 @@ from curl_cffi.requests import Session, Response
 from ..config.constants import ERROR_MESSAGES
 from ..config.settings import get_settings
 from .openai.sentinel import SentinelPOWError, build_sentinel_pow_token
+from .proxy_utils import build_requests_proxy_map, normalize_proxy_url
 
 
 logger = logging.getLogger(__name__)
@@ -56,19 +57,14 @@ class HTTPClient:
             config: 请求配置
             session: 可重用的会话对象
         """
-        self.proxy_url = proxy_url
+        self.proxy_url = normalize_proxy_url(proxy_url)
         self.config = config or RequestConfig()
         self._session = session
 
     @property
     def proxies(self) -> Optional[Dict[str, str]]:
         """获取代理配置"""
-        if not self.proxy_url:
-            return None
-        return {
-            "http": self.proxy_url,
-            "https": self.proxy_url,
-        }
+        return build_requests_proxy_map(self.proxy_url)
 
     @property
     def session(self) -> Session:
@@ -361,35 +357,10 @@ class OpenAIHTTPClient(HTTPClient):
         Returns:
             Sentinel token 或 None
         """
-        from ..config.constants import OPENAI_API_ENDPOINTS
-
         try:
-            pow_token = build_sentinel_pow_token(self.default_headers.get("User-Agent", ""))
-            sen_req_body = json.dumps({
-                "p": pow_token,
-                "id": did,
-                "flow": "authorize_continue",
-            }, separators=(",", ":"))
-
-            response = self.post(
-                OPENAI_API_ENDPOINTS["sentinel"],
-                headers={
-                    "origin": "https://sentinel.openai.com",
-                    "referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
-                    "content-type": "text/plain;charset=UTF-8",
-                },
-                data=sen_req_body,
-            )
-
-            if response.status_code == 200:
-                return response.json().get("token")
-            else:
-                logger.warning(f"Sentinel 检查失败: {response.status_code}")
-                return None
-
-        except SentinelPOWError as e:
-            logger.error(f"Sentinel POW 求解失败: {e}")
-            return None
+            from .openai.sentinel_token_v2 import build_sentinel_token
+            user_agent = self.default_headers.get("User-Agent", "")
+            return build_sentinel_token(self.session, did, flow="authorize_continue", user_agent=user_agent)
         except Exception as e:
             logger.error(f"Sentinel 检查异常: {e}")
             return None

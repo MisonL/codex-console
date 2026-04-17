@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>注册控制台 - OpenAI 注册系统</title>
     <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230f5ae0'/><path d='M18 18h28v28H18z' fill='white' opacity='0.14'/><path d='M24 24h16v16H24z' fill='white'/></svg>">
     <style>
         /* 两栏布局 */
         .two-column-layout {
@@ -79,13 +79,17 @@
         }
 
         .password-hidden {
-            filter: blur(4px);
+            -webkit-text-security: disc;
+            color: transparent;
+            text-shadow: 0 0 8px rgba(82, 98, 122, 0.55);
             cursor: pointer;
-            transition: filter 0.2s;
+            transition: color 0.15s, text-shadow 0.15s;
         }
 
         .password-hidden:hover {
-            filter: blur(0);
+            color: inherit;
+            text-shadow: none;
+            -webkit-text-security: none;
         }
 
         .recent-role-cell {
@@ -339,8 +343,8 @@
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">⚙️</a>
-            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">🌙</button>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
         </div>
         </nav>
 
@@ -348,7 +352,7 @@
         <main class="main-content">
             <div class="card today-stats-strip">
                 <div class="card-header">
-                    <h3>📊 今日统计</h3>
+                    <h3>今日统计</h3>
                     <span class="today-stats-reset" id="today-stats-reset">重置剩余 --:--</span>
                 </div>
                 <div class="card-body">
@@ -379,7 +383,7 @@
                     <div class="panel-stack">
                     <div class="card">
                         <div class="card-header">
-                            <h3>📝 注册设置</h3>
+                            <h3>注册设置</h3>
                         </div>
                         <div class="card-body">
                             <form id="registration-form">
@@ -426,6 +430,7 @@
                                         <label for="outlook-concurrency-count">并发数 (1-50)</label>
                                         <input type="number" id="outlook-concurrency-count" name="outlook_concurrency_count" min="1" max="50" value="3">
                                         <small id="outlook-concurrency-hint" style="color: var(--text-muted); font-size: 0.75rem;">同时最多运行 N 个任务，每隔 interval 秒启动新任务</small>
+                                        <small id="outlook-wait-strategy-hint" style="display: block; color: var(--text-muted); font-size: 0.75rem; margin-top: 6px;"></small>
                                     </div>
                                     <div id="outlook-interval-group">
                                         <div class="form-group">
@@ -463,6 +468,16 @@
                                     </select>
                                 </div>
 
+                                <div class="form-group" id="refresh-token-mode-group">
+                                    <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer;">
+                                        <input type="checkbox" id="refresh-token-enabled" name="refresh_token_enabled" checked>
+                                        <span>有 RT</span>
+                                    </label>
+                                    <small style="display: block; color: var(--text-muted); margin-top: 6px;">
+                                        启用后走新 PR 链路，要求产出 Access Token + Refresh Token；关闭后走无 RT 兼容方案。
+                                    </small>
+                                </div>
+
                                 <div class="form-group" id="batch-count-group" style="display: none;">
                                     <label for="batch-count">注册数量 (1-1000)</label>
                                     <input type="number" id="batch-count" name="batch_count" min="1" max="1000" value="5">
@@ -481,6 +496,7 @@
                                         <label for="concurrency-count">并发数 (1-50)</label>
                                         <input type="number" id="concurrency-count" name="concurrency_count" min="1" max="50" value="3">
                                         <small id="concurrency-hint" style="color: var(--text-muted); font-size: 0.75rem;">同时最多运行 N 个任务，每隔 interval 秒启动新任务</small>
+                                        <small id="wait-strategy-hint" style="display: block; color: var(--text-muted); font-size: 0.75rem; margin-top: 6px;"></small>
                                     </div>
 
                                     <div id="interval-group">
@@ -622,7 +638,7 @@
 
                                 <div class="form-actions" style="flex-direction: column;">
                                     <button type="submit" class="btn btn-primary btn-lg" id="start-btn" style="width: 100%;">
-                                        🚀 开始注册
+                                        开始注册
                                     </button>
                                     <button type="button" class="btn btn-secondary" id="cancel-btn" disabled style="width: 100%;">
                                         取消任务
@@ -746,7 +762,7 @@
                                     <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
                                 </div>
                                 <div class="batch-stats" style="margin-top: var(--spacing-sm);">
-                                    <span>✅ <strong id="batch-success">0</strong></span>
+                                    <span>成功 <strong id="batch-success">0</strong></span>
                                     <span>❌ <strong id="batch-failed">0</strong></span>
                                     <span>⏳ <strong id="batch-remaining">0</strong></span>
                                 </div>
@@ -762,7 +778,7 @@
                     <div class="card">
                         <div class="card-header">
                             <h3>🗓️ 计划任务列表</h3>
-                            <button class="btn btn-ghost btn-sm" id="refresh-schedules-btn">🔄 刷新</button>
+                            <button class="btn btn-ghost btn-sm" id="refresh-schedules-btn">刷新</button>
                         </div>
                         <div class="card-body" style="padding: 0;">
                             <table class="data-table">
@@ -793,9 +809,9 @@
                     <!-- 已注册账号列表 -->
                     <div class="card">
                         <div class="card-header">
-                            <h3>📋 已注册账号</h3>
+                            <h3>已注册账号</h3>
                             <div style="display: flex; gap: var(--spacing-sm);">
-                                <button class="btn btn-ghost btn-sm" id="refresh-accounts-btn">🔄 刷新</button>
+                                <button class="btn btn-ghost btn-sm" id="refresh-accounts-btn">刷新</button>
                                 <a href="/accounts" class="btn btn-secondary btn-sm">查看全部</a>
                             </div>
                         </div>
@@ -835,10 +851,6 @@
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
-
-
-
 
 
 

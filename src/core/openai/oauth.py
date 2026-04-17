@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 from curl_cffi import requests as cffi_requests
 
+from ..proxy_utils import build_requests_proxy_map, normalize_proxy_url
 from ...config.constants import (
     OAUTH_CLIENT_ID,
     OAUTH_AUTH_URL,
@@ -141,12 +142,8 @@ def _post_form(
         响应 JSON 数据
     """
     # 构建代理配置
-    proxies = None
-    if proxy_url:
-        proxies = {
-            "http": proxy_url,
-            "https": proxy_url,
-        }
+    normalized_proxy = normalize_proxy_url(proxy_url)
+    proxies = build_requests_proxy_map(normalized_proxy)
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -190,7 +187,8 @@ def generate_oauth_url(
     *,
     redirect_uri: str = OAUTH_REDIRECT_URI,
     scope: str = OAUTH_SCOPE,
-    client_id: str = OAUTH_CLIENT_ID
+    client_id: str = OAUTH_CLIENT_ID,
+    originator: str = "",
 ) -> OAuthStart:
     """
     生成 OAuth 授权 URL
@@ -219,6 +217,8 @@ def generate_oauth_url(
         "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
     }
+    if str(originator or "").strip():
+        params["originator"] = str(originator).strip()
     auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(params)}"
     return OAuthStart(
         auth_url=auth_url,
@@ -321,21 +321,24 @@ class OAuthManager:
         token_url: str = OAUTH_TOKEN_URL,
         redirect_uri: str = OAUTH_REDIRECT_URI,
         scope: str = OAUTH_SCOPE,
-        proxy_url: Optional[str] = None
+        proxy_url: Optional[str] = None,
+        originator: str = "",
     ):
         self.client_id = client_id
         self.auth_url = auth_url
         self.token_url = token_url
         self.redirect_uri = redirect_uri
         self.scope = scope
-        self.proxy_url = proxy_url
+        self.proxy_url = normalize_proxy_url(proxy_url)
+        self.originator = str(originator or "").strip()
 
     def start_oauth(self) -> OAuthStart:
         """开始 OAuth 流程"""
         return generate_oauth_url(
             redirect_uri=self.redirect_uri,
             scope=self.scope,
-            client_id=self.client_id
+            client_id=self.client_id,
+            originator=self.originator,
         )
 
     def handle_callback(

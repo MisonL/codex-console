@@ -11,14 +11,39 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.types import TypeDecorator
 
 from ..config.constants import AccountLabel, PoolState, RoleTag
+from ..core.proxy_utils import build_proxy_url_from_components, split_proxy_components
 from ..core.timezone_utils import utcnow_naive
 
 Base = declarative_base()
 
 
+def _safe_isoformat(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    iso_fn = getattr(value, "isoformat", None)
+    if callable(iso_fn):
+        try:
+            return str(iso_fn())
+        except Exception:
+            pass
+    text = str(value).strip()
+    return text or None
+
+
+def _safe_positive_int(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
 class JSONEncodedDict(TypeDecorator):
     """JSON 编码字典类型"""
     impl = Text
+    cache_ok = True
 
     def process_bind_param(self, value: Optional[Dict[str, Any]], dialect):
         if value is None:
@@ -51,7 +76,7 @@ class Account(Base):
     registered_at = Column(DateTime, default=utcnow_naive)
     last_refresh = Column(DateTime)  # 最后刷新时间
     expires_at = Column(DateTime)  # Token 过期时间
-    status = Column(String(20), default='active')  # 'active', 'expired', 'banned', 'failed'
+    status = Column(String(20), default='active')  # 'active', 'pending_token', 'pending_phone', 'expired', 'banned', 'failed'
     extra_data = Column(JSONEncodedDict)  # 额外信息存储
     cpa_uploaded = Column(Boolean, default=False)  # 是否已上传到 CPA
     cpa_uploaded_at = Column(DateTime)  # 上传时间
@@ -67,7 +92,7 @@ class Account(Base):
     subscription_type = Column(String(20))  # None / 'plus' / 'team'
     subscription_at = Column(DateTime)  # 订阅开通时间
     cookies = Column(Text)  # 完整 cookie 字符串，用于支付请求
-    created_at = Column(DateTime, default=utcnow_naive)
+    created_at = Column(DateTime, default=utcnow_naive, index=True)
     updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
     bind_card_tasks = relationship("BindCardTask", back_populates="account")
     team_invite_records = relationship("TeamInviteRecord", back_populates="inviter_account")
@@ -410,38 +435,50 @@ class Proxy(Base):
 
     def to_dict(self, include_password: bool = False) -> Dict[str, Any]:
         """转换为字典"""
+        try:
+            normalized = split_proxy_components(
+                self.type,
+                self.host,
+                self.port,
+                self.username,
+                self.password,
+            )
+        except Exception:
+            normalized = {
+                "type": str(self.type or "http").strip() or "http",
+                "host": str(self.host or "").strip(),
+                "port": _safe_positive_int(self.port),
+                "username": str(self.username or "").strip() or None,
+                "password": str(self.password or "").strip() or None,
+            }
         result = {
             'id': self.id,
             'name': self.name,
-            'type': self.type,
-            'host': self.host,
-            'port': self.port,
-            'username': self.username,
+            'type': normalized.get('type') or "http",
+            'host': normalized.get('host') or "",
+            'port': normalized.get('port'),
+            'username': normalized.get('username'),
             'enabled': self.enabled,
             'is_default': self.is_default or False,
             'priority': self.priority,
-            'last_used': self.last_used.isoformat() if self.last_used else None,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'last_used': _safe_isoformat(self.last_used),
+            'created_at': _safe_isoformat(self.created_at),
+            'updated_at': _safe_isoformat(self.updated_at),
         }
         if include_password:
-            result['password'] = self.password
+            result['password'] = normalized.get('password')
         else:
-            result['has_password'] = bool(self.password)
+            result['has_password'] = bool(normalized.get('password'))
         return result
 
     @property
     def proxy_url(self) -> str:
         """获取完整的代理 URL"""
-        if self.type == "http":
-            scheme = "http"
-        elif self.type == "socks5":
-            scheme = "socks5"
-        else:
-            scheme = self.type
-
-        auth = ""
-        if self.username and self.password:
-            auth = f"{self.username}:{self.password}@"
-
-        return f"{scheme}://{auth}{self.host}:{self.port}"
+        proxy_url = build_proxy_url_from_components(
+            self.type,
+            self.host,
+            self.port,
+            self.username,
+            self.password,
+        )
+        return proxy_url or ""

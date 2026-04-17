@@ -119,16 +119,55 @@ def generate_password(length: int = DEFAULT_PASSWORD_LENGTH) -> str:
 
 def generate_random_string(length: int = 8) -> str:
     """
-    生成随机字符串（仅字母）
-
-    Args:
-        length: 字符串长度
-
-    Returns:
-        随机字符串
+    生成高度真实的邮箱前缀。
+    采用全量拼音池 + 英文姓名池，支持 20万+ 级别的组合。
     """
-    chars = string.ascii_letters
-    return ''.join(secrets.choice(chars) for _ in range(length))
+    import random
+    import string
+    try:
+        from faker import Faker
+        from pypinyin import pinyin, Style
+    except ImportError:
+        # 回退逻辑：如果库未安装，使用基础随机字符
+        chars = string.ascii_lowercase + string.digits
+        return ''.join(random.choice(chars) for _ in range(length))
+
+    # 初始化 Faker，支持中文和英文
+    fake_zh = Faker('zh_CN')
+    fake_en = Faker('en_US')
+    
+    # 随机选择模式：1. 中文拼音 2. 纯英文姓名 3. 混合模式
+    choice = random.random()
+    
+    if choice < 0.5:
+        # 模式 1: 中文拼音 (如 zhang.wei, li_qiang)
+        name = fake_zh.name()
+        # 转换为拼音
+        py_list = pinyin(name, style=Style.NORMAL)
+        py_name = [item[0].lower() for item in py_list]
+        
+        sep = random.choice(['', '.', '_', ''])
+        prefix = sep.join(py_name)
+    else:
+        # 模式 2: 英文姓名 (如 john.doe, smith_a)
+        first = fake_en.first_name().lower()
+        last = fake_en.last_name().lower()
+        
+        sep = random.choice(['', '.', '_', '', random.choice(string.digits)])
+        prefix = f"{first}{sep}{last}"
+
+    # 随机决定是否增加少量后缀数字
+    if random.random() < 0.3:
+        prefix += str(random.randint(1, 999))
+
+    # 清洗：移除空格和其他非法字符
+    prefix = ''.join(c for c in prefix if c in (string.ascii_lowercase + string.digits + "._"))
+    
+    # 长度修正：如果生成的太短或太长
+    if len(prefix) < 5:
+        prefix += ''.join(random.choices(string.digits, k=3))
+    
+    return prefix[:max(length, 15)]
 
 
 def generate_uuid() -> str:
