@@ -2918,11 +2918,11 @@ async function refreshOutlookRegistrationStatus() {
     renderOutlookAccounts(outlookAccounts);
     addLog(
       "info",
-      `[??] Outlook ??????? (???: ${data.registered_count}, ???: ${data.unregistered_count})`,
+      `[自检] Outlook 账号状态已刷新 (已注册: ${data.registered_count}, 未注册: ${data.unregistered_count})`,
     );
-    toast.success("Outlook ???????");
+    toast.success("Outlook 账号状态已刷新");
   } catch (error) {
-    console.error("?? Outlook ??????:", error);
-    toast.error("?? Outlook ??????: " + error.message);
+    console.error("刷新 Outlook 账号状态失败:", error);
+    toast.error("刷新 Outlook 账号状态失败: " + error.message);
   }
 }

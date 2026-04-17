@@ -25,6 +25,7 @@ from .anyauto.registration_mode import (
     resolve_chatgpt_registration_mode,
 )
 from .openai.oauth import OAuthManager, OAuthStart
+from .openai.sentinel_headers import build_sentinel_token
 from .openai.sentinel_browser import BrowserSentinelError, fetch_browser_sentinel_artifacts
 from .http_client import OpenAIHTTPClient, HTTPClientError
 from .proxy_utils import normalize_proxy_url
@@ -755,7 +756,6 @@ class RegistrationEngine:
                 
                 sentinel_header = None
                 try:
-                    from .openai.sentinel_token_v2 import build_sentinel_token
                     user_agent, _ = self._current_browser_identity()
                     sentinel_header = build_sentinel_token(self.session, did, flow="password_verify", user_agent=user_agent)
                 except Exception as e:
@@ -2101,7 +2101,6 @@ class RegistrationEngine:
             
             sentinel = None
             try:
-                from .openai.sentinel_token_v2 import build_sentinel_token
                 user_agent, _ = self._current_browser_identity()
                 sentinel_header = build_sentinel_token(self.session, resolved_did, flow="username_password_create", user_agent=user_agent)
                 if sentinel_header:
@@ -2361,14 +2360,51 @@ class RegistrationEngine:
             self._last_otp_validation_status_code = None
             self._last_otp_validation_outcome = ""
             code_body = f'{{"code":"{code}"}}'
+            otp_headers = {
+                "referer": "https://auth.openai.com/email-verification",
+                "accept": "application/json",
+                "content-type": "application/json",
+            }
+
+            resolved_did = str(
+                self.device_id
+                or getattr(self.session.cookies, "get", lambda *_args, **_kwargs: "")("oai-did")
+                or ""
+            ).strip()
+            sentinel_header = None
+
+            try:
+                user_agent, _ = self._current_browser_identity()
+                sentinel_header = build_sentinel_token(
+                    self.session,
+                    resolved_did,
+                    flow="email_otp_validate",
+                    user_agent=user_agent,
+                )
+            except Exception as e:
+                self._log(f"OTP 校验构建 Sentinel Token (纯 Python) 失败: {e}", "warning")
+
+            if not sentinel_header:
+                try:
+                    sentinel = self._fetch_browser_sentinel_artifacts(
+                        flow="email_otp_validate",
+                        page_url="https://auth.openai.com/email-verification",
+                    )
+                    sentinel_header = self._build_sentinel_header_value(
+                        resolved_did,
+                        sentinel.token if sentinel else None,
+                    )
+                except Exception as e:
+                    self._log(f"OTP 校验 Browser Sentinel 兜底失败: {e}", "warning")
+
+            if sentinel_header:
+                otp_headers["OpenAI-Sentinel-Token"] = sentinel_header
+            else:
+                self._log("OTP 校验未生成 Sentinel Token，继续使用标准请求头", "warning")
 
             response = self.session.post(
                 OPENAI_API_ENDPOINTS["validate_otp"],
-                headers={
-                    "referer": "https://auth.openai.com/email-verification",
-                    "accept": "application/json",
-                    "content-type": "application/json",
-                },
+                headers=otp_headers,
                 data=code_body,
             )
 
@@ -2521,7 +2557,6 @@ class RegistrationEngine:
             
             sentinel = None
             try:
-                from .openai.sentinel_token_v2 import build_sentinel_token
                 user_agent, _ = self._current_browser_identity()
                 sentinel_header = build_sentinel_token(self.session, resolved_did, flow="oauth_create_account", user_agent=user_agent)
                 if sentinel_header:
@@ -3091,7 +3126,7 @@ class RegistrationEngine:
         result.session_token = str(flow_result.get("session_token") or "")
         result.account_id = str(flow_result.get("account_id") or "")
         result.workspace_id = str(flow_result.get("workspace_id") or "")
-        result.source = "register"
+        result.source = str(flow_result.get("source") or "register")
 
         if not result.account_id:
             token_payload = result.access_token or result.id_token
@@ -3110,6 +3145,7 @@ class RegistrationEngine:
             or ""
         ).strip()
         metadata = dict(flow_result.get("metadata") or {})
+        flow_state = str(flow_result.get("state") or metadata.get("result_state") or "").strip()
         metadata.update(
             {
                 "email_service": self.email_service.service_type.value,
@@ -3127,6 +3163,8 @@ class RegistrationEngine:
                 "chatgpt_has_refresh_token_solution": resolved_mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
             }
         )
+        if flow_state:
+            metadata["result_state"] = flow_state
         result.metadata = metadata
         return result
 
@@ -3269,6 +3307,34 @@ class RegistrationEngine:
             if (not result.account_id) and result.workspace_id:
                 result.account_id = str(result.workspace_id or "").strip()
 
+            metadata = dict(result.metadata or {})
+            repair_metadata = dict(metadata.get("repair_metadata") or {})
+            continue_url = str(
+                repair_metadata.get("continue_url")
+                or metadata.get("continue_url")
+                or getattr(self, "_last_validate_otp_continue_url", "")
+                or getattr(self, "_create_account_continue_url", "")
+                or ""
+            ).strip()
+            if cookie_text and not repair_metadata.get("cookies"):
+                repair_metadata["cookies"] = cookie_text
+            if continue_url and not repair_metadata.get("continue_url"):
+                repair_metadata["continue_url"] = continue_url
+            if repair_metadata:
+                metadata["repair_metadata"] = repair_metadata
+
+            has_valid_session_token = bool(str(result.session_token or "").strip())
+            if has_valid_session_token:
+                account_status = AccountStatus.ACTIVE.value
+            elif bool(
+                metadata.get("phone_verification_required")
+                or (metadata.get("result_state") == AccountStatus.PENDING_PHONE.value)
+                or (repair_metadata.get("state") == AccountStatus.PENDING_PHONE.value)
+            ):
+                account_status = AccountStatus.PENDING_PHONE.value
+            else:
+                account_status = AccountStatus.PENDING_TOKEN.value
+
             with get_db() as db:
                 # 保存账户信息
                 account = crud.create_account(
@@ -3286,7 +3352,8 @@ class RegistrationEngine:
                     refresh_token=result.refresh_token,
                     id_token=result.id_token,
                     proxy_used=self.proxy_url,
-                    extra_data=result.metadata,
+                    extra_data=metadata,
+                    status=account_status,
                     source=result.source,
                     account_label=account_label,
                     role_tag=role_tag,

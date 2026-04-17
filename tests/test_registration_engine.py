@@ -236,7 +236,7 @@ def test_check_sentinel_sends_non_empty_pow(monkeypatch):
         return "sentinel-token-v2"
 
     monkeypatch.setattr(
-        "src.core.openai.sentinel_token_v2.build_sentinel_token",
+        "src.core.http_client.build_sentinel_token",
         fake_build_sentinel_token,
     )
 
@@ -275,7 +275,7 @@ def test_register_password_sends_device_and_sentinel_headers(monkeypatch):
     engine._log = lambda *_args, **_kwargs: None
     monkeypatch.setattr(engine, "_generate_password", lambda length=12: "Aa1!fixedPwd")
     monkeypatch.setattr(
-        "src.core.openai.sentinel_token_v2.build_sentinel_token",
+        "src.core.register.build_sentinel_token",
         lambda session, did, *, flow, user_agent: "sentinel-token-v2",
     )
 
@@ -372,7 +372,7 @@ def test_run_registers_then_relogs_to_fetch_token(monkeypatch):
     engine.oauth_manager = fake_oauth
     engine.registration_entry_flow = "outlook"
     monkeypatch.setattr(
-        "src.core.openai.sentinel_token_v2.build_sentinel_token",
+        "src.core.register.build_sentinel_token",
         lambda session, did, *, flow, user_agent: f"sentinel-{flow}",
     )
 
@@ -436,6 +436,77 @@ def test_run_registers_then_relogs_to_fetch_token(monkeypatch):
     assert result.metadata["token_acquired_via_relogin"] is True
 
 
+def test_validate_verification_code_sends_email_otp_sentinel_header(monkeypatch):
+    session = QueueSession(
+        [
+            ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
+        ]
+    )
+
+    engine = RegistrationEngine.__new__(RegistrationEngine)
+    engine.session = session
+    engine.device_id = "did-otp"
+    engine._last_otp_validation_code = None
+    engine._last_otp_validation_status_code = None
+    engine._last_otp_validation_outcome = ""
+    engine._last_validate_otp_continue_url = None
+    engine._last_validate_otp_workspace_id = None
+    engine._log = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(
+        engine,
+        "_current_browser_identity",
+        lambda: ("Mozilla/5.0", '"Chromium";v="136"'),
+    )
+    monkeypatch.setattr(
+        "src.core.register.build_sentinel_token",
+        lambda session, did, *, flow, user_agent: "sentinel-email-otp",
+    )
+
+    assert RegistrationEngine._validate_verification_code(engine, "123456") is True
+
+    headers = session.calls[0]["kwargs"]["headers"]
+    assert headers["OpenAI-Sentinel-Token"] == "sentinel-email-otp"
+
+
+def test_validate_verification_code_continues_without_sentinel_when_generation_fails(monkeypatch):
+    session = QueueSession(
+        [
+            ("POST", OPENAI_API_ENDPOINTS["validate_otp"], DummyResponse(payload={})),
+        ]
+    )
+    logs = []
+
+    engine = RegistrationEngine.__new__(RegistrationEngine)
+    engine.session = session
+    engine.device_id = "did-otp"
+    engine._last_otp_validation_code = None
+    engine._last_otp_validation_status_code = None
+    engine._last_otp_validation_outcome = ""
+    engine._last_validate_otp_continue_url = None
+    engine._last_validate_otp_workspace_id = None
+    engine._log = lambda message, level="info": logs.append((level, message))
+    monkeypatch.setattr(
+        engine,
+        "_current_browser_identity",
+        lambda: ("Mozilla/5.0", '"Chromium";v="136"'),
+    )
+    monkeypatch.setattr(
+        "src.core.register.build_sentinel_token",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("pow boom")),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_fetch_browser_sentinel_artifacts",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("browser boom")),
+    )
+
+    assert RegistrationEngine._validate_verification_code(engine, "123456") is True
+
+    headers = session.calls[0]["kwargs"]["headers"]
+    assert "OpenAI-Sentinel-Token" not in headers
+    assert any("继续使用标准请求头" in message for _level, message in logs)
+
+
 def test_existing_account_login_uses_auto_sent_otp_without_manual_send(monkeypatch):
     _patch_browser_sentinel(monkeypatch)
     session = QueueSession(
@@ -488,7 +559,7 @@ def test_existing_account_login_uses_auto_sent_otp_without_manual_send(monkeypat
     engine.oauth_manager = fake_oauth
     engine.registration_entry_flow = "outlook"
     monkeypatch.setattr(
-        "src.core.openai.sentinel_token_v2.build_sentinel_token",
+        "src.core.register.build_sentinel_token",
         lambda session, did, *, flow, user_agent: f"sentinel-{flow}",
     )
 

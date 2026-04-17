@@ -1,45 +1,47 @@
-# Account Batch Actions Review
+# 账号批量操作代码审查
 
-## Scope
+## 范围
 
-- Branch: `feature/account-batch-action-tooltips`
-- Base: `upstream/main`
-- Goal:
-  - fix the three broken batch action routes on the accounts page
-  - keep button labels stable in idle state
-  - replace native `title` hints with hover bubbles shown below the buttons
+- 分支：`feature/account-batch-action-tooltips`
+- 基础分支：`upstream/main`
+- 目标：
+  - 修复账号管理页面上损坏的三个批量操作路由
+  - 保持按钮在空闲状态下的标签文字稳定
+  - 将原生的 `title` 提示替换为显示在按钮下方的悬浮气泡提示
 
-## Verification
+## 验证过程
 
-### Static Check
+### 静态检查
 
-Command:
+命令：
 
 ```bash
 python3 -m py_compile src/web/routes/accounts.py src/web/routes/payment.py
 ```
 
-Result:
+结果：
 
 ```text
 exit code 0
 ```
 
-### Runtime Check
+### 运行时检查
 
-Isolated instance:
+独立实例验证：
 
-- URL: `http://127.0.0.1:16667`
-- Access password: `admin123`
+- URL：`http://127.0.0.1:16667`
+- 访问密码：在运行脚本之前，请在本地 Shell 中设置 `REVIEW_LOGIN_PASSWORD` 环境变量。
 
-Command:
+命令：
 
 ```bash
 python3 - <<'PY'
 import urllib.parse, urllib.request, http.cookiejar, json
+import os
 jar = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-login_data = urllib.parse.urlencode({'password': 'admin123'}).encode()
+password = os.environ['REVIEW_LOGIN_PASSWORD']
+login_data = urllib.parse.urlencode({'password': password}).encode()
 login_req = urllib.request.Request('http://127.0.0.1:16667/login', data=login_data, method='POST')
 login_req.add_header('Content-Type', 'application/x-www-form-urlencoded')
 login_resp = opener.open(login_req, timeout=10)
@@ -68,7 +70,7 @@ for path, poll_prefix in [
 PY
 ```
 
-Result:
+结果：
 
 ```text
 login_status 200
@@ -81,15 +83,15 @@ accounts_status 200
 /api/payment/ops/tasks/ 200 completed
 ```
 
-### UI Check
+### UI 界面检查
 
-- Hovering `刷新Token` shows a custom bubble below the button
-- Hovering `验证Token` shows a custom bubble below the button
-- Hovering `检测订阅` shows a custom bubble below the button
-- When selection count changes, these three buttons keep stable idle labels
+- 悬停在 `刷新Token` 按钮上，下方会显示自定义的提示气泡
+- 悬停在 `验证Token` 按钮上，下方会显示自定义的提示气泡
+- 悬停在 `检测订阅` 按钮上，下方会显示自定义的提示气泡
+- 当勾选的账号数量发生变化时，这三个按钮在空闲状态下的文字标签依然保持稳定不变
 
-## Conclusion
+## 结论
 
-- The broken batch action routes are fixed on this branch
-- Hover help now matches the requested interaction model
-- No formal environment deployment was required for this review
+- 本分支已成功修复了损坏的批量操作路由
+- 悬停提示气泡的行为现已符合所要求的交互模式
+- 本次审查无需进行正式的环境部署

@@ -16,7 +16,8 @@ except ImportError:
     sys.exit(1)
 
 from ..openai.sentinel_browser import fetch_browser_sentinel_artifacts
-from ..openai.sentinel_token_v2 import build_sentinel_token
+from ..openai.sentinel_headers import build_sentinel_token
+from ..proxy_utils import is_retryable_proxy_probe
 from .utils import (
     FlowState,
     build_browser_headers,
@@ -295,11 +296,123 @@ class ChatGPTClient:
             "auth_provider": "oauth_token_exchange",
             "raw_session": {},
         }
+
+    def _build_refresh_token_only_result(self, refresh_token, session_token="", auth_provider="captured_refresh_token"):
+        resolved_refresh_token = str(refresh_token or self.refresh_token or "").strip()
+        return {
+            "access_token": "",
+            "refresh_token": resolved_refresh_token,
+            "session_token": str(session_token or "").strip(),
+            "account_id": "",
+            "user_id": "",
+            "workspace_id": "",
+            "expires": "",
+            "user": {},
+            "account": {},
+            "auth_provider": auth_provider,
+            "raw_session": {},
+        }
     
     def _log(self, msg, level="info"):
         """输出日志"""
         if self.verbose:
             print(f"  {msg}")
+
+    def _should_retry_proxy_exception(self, exc):
+        if not self.proxy:
+            return False
+        message = str(exc or "").strip()
+        lower_message = message.lower()
+        if is_retryable_proxy_probe(None, message):
+            return True
+        retry_markers = (
+            "getaddrinfo",
+            "could not resolve proxy",
+            "failed to resolve proxy",
+            "failed to resolve host",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "nodename nor servname provided",
+            "connection reset by peer",
+        )
+        return any(marker in lower_message for marker in retry_markers)
+
+    def _request_with_proxy_retry(self, method, url, *, retry_label="", max_attempts=None, **kwargs):
+        attempts = max(1, int(max_attempts or (3 if self.proxy else 1)))
+        request_fn = getattr(self.session, method)
+
+        for attempt in range(attempts):
+            try:
+                return request_fn(url, **kwargs)
+            except Exception as exc:
+                if attempt >= attempts - 1 or (not self._should_retry_proxy_exception(exc)):
+                    raise
+                label = retry_label or f"{method.upper()} {url}"
+                self._log(
+                    f"{label} 命中代理解析/连接异常，准备重试 {attempt + 2}/{attempts}: {str(exc)[:160]}",
+                    level="warning",
+                )
+                time.sleep(0.5 * (attempt + 1))
+
+    @staticmethod
+    def _extract_session_token_from_cookie_jar(cookie_jar):
+        if not cookie_jar:
+            return ""
+
+        entries = []
+        try:
+            for key, value in cookie_jar.items():
+                entries.append((str(key or "").strip(), str(value or "").strip()))
+        except Exception:
+            pass
+
+        try:
+            jar = getattr(cookie_jar, "jar", None)
+            if jar is not None:
+                for cookie in jar:
+                    entries.append(
+                        (
+                            str(getattr(cookie, "name", "") or "").strip(),
+                            str(getattr(cookie, "value", "") or "").strip(),
+                        )
+                    )
+        except Exception:
+            pass
+
+        direct_candidates = [
+            value
+            for name, value in entries
+            if name in (
+                "__Secure-next-auth.session-token",
+                "_Secure-next-auth.session-token",
+                "next-auth.session-token",
+            )
+            and value
+        ]
+        if direct_candidates:
+            return max(direct_candidates, key=len)
+
+        chunk_map = {}
+        for name, value in entries:
+            if not (
+                name.startswith("__Secure-next-auth.session-token.")
+                or name.startswith("_Secure-next-auth.session-token.")
+                or name.startswith("next-auth.session-token.")
+            ):
+                continue
+            if not value:
+                continue
+            try:
+                idx = int(name.rsplit(".", 1)[-1])
+            except Exception:
+                continue
+            previous = chunk_map.get(idx, "")
+            if (not previous) or len(value) > len(previous):
+                chunk_map[idx] = value
+
+        if chunk_map:
+            return "".join(chunk_map[i] for i in sorted(chunk_map.keys()))
+        return ""
 
     def _sniff_refresh_token(self, response):
         """
@@ -543,8 +656,10 @@ class ChatGPTClient:
         if not stop_before_callback:
             try:
                 self._browser_pause()
-                r = self.session.get(
+                r = self._request_with_proxy_retry(
+                    "get",
                     target_url,
+                    retry_label="follow continue_url",
                     headers=self._headers(
                         target_url,
                         accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -597,8 +712,10 @@ class ChatGPTClient:
 
             try:
                 self._browser_pause()
-                r = self.session.get(
+                r = self._request_with_proxy_retry(
+                    "get",
                     current_url,
+                    retry_label=f"follow[{hop + 1}]",
                     headers=self._headers(
                         current_url,
                         accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -725,11 +842,25 @@ class ChatGPTClient:
             if domain_hint and domain_hint not in (cookie.domain or ""):
                 continue
             return cookie.value
-        return ""
+        try:
+            return str(self.session.cookies.get(name) or "").strip()
+        except Exception:
+            return ""
 
     def get_next_auth_session_token(self):
         """获取 ChatGPT next-auth 会话 Cookie。"""
-        return self._get_cookie_value("__Secure-next-auth.session-token", "chatgpt.com")
+        session_token = self._extract_session_token_from_cookie_jar(self.session.cookies)
+        if session_token:
+            return session_token
+        for cookie_name in (
+            "__Secure-next-auth.session-token",
+            "_Secure-next-auth.session-token",
+            "next-auth.session-token",
+        ):
+            session_token = self._get_cookie_value(cookie_name, "chatgpt.com")
+            if session_token:
+                return session_token
+        return ""
 
     def extract_refresh_token_from_cookies(self):
         """从 Cookies 中尝试提取 refresh_token（支持 oaistb_rt_ 前缀）。"""
@@ -761,8 +892,10 @@ class ChatGPTClient:
             "X-OpenAI-Device-Id": self.device_id,
         }
         
-        response = self.session.get(
+        response = self._request_with_proxy_retry(
+            "get",
             url,
+            retry_label="/api/auth/session",
             headers=self._headers(
                 url,
                 accept="application/json",
@@ -821,8 +954,10 @@ class ChatGPTClient:
         login_url = f"{self.BASE}/auth/login"
         self._log(f"二次登录: 访问登录入口 {login_url} ...")
         try:
-            r = self.session.get(
+            r = self._request_with_proxy_retry(
+                "get",
                 login_url,
+                retry_label="secondary login bootstrap",
                 headers=self._headers(
                     login_url,
                     accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -866,8 +1001,10 @@ class ChatGPTClient:
                 # 提交密码
                 self._log("二次登录: 正在提交密码验证...")
                 payload = {"username": email, "password": password}
-                r = self.session.post(
+                r = self._request_with_proxy_retry(
+                    "post",
                     f"{self.AUTH}/api/accounts/login/password",
+                    retry_label="secondary login password",
                     headers=self._headers(
                         f"{self.AUTH}/api/accounts/login/password",
                         accept="application/json",
@@ -925,6 +1062,33 @@ class ChatGPTClient:
                 stop_before_callback=True,
             )
             if not ok:
+                callback_url = self._pick_best_callback_url(
+                    self.last_follow_callback_url,
+                    state.continue_url,
+                    state.current_url,
+                )
+                if callback_url:
+                    self._log("注册回调跟随未完成，尝试使用已捕获 callback 补落地 next-auth ...")
+                    self._finalize_nextauth_callback(
+                        callback_url,
+                        referer=f"{self.BASE}/auth/login",
+                    )
+                    session_cookie = self.get_next_auth_session_token()
+                    if not self.refresh_token and "code=" in callback_url:
+                        self._log("注册回调跟随失败，改用已捕获 callback 执行手动 OAuth 交换 ...")
+                        manual_tokens = self._manual_exchange_callback_tokens(callback_url)
+                    if manual_tokens and manual_tokens.get("access_token"):
+                        self._log("注册回调跟随失败，但手动换码已成功，直接返回 OAuth tokens")
+                        return True, self._build_oauth_token_result(
+                            manual_tokens,
+                            session_token=session_cookie,
+                        )
+                    if self.refresh_token:
+                        self._log("注册回调跟随失败，但已捕获 refresh_token，保留 RT 返回")
+                        return True, self._build_refresh_token_only_result(
+                            self.refresh_token,
+                            session_token=session_cookie,
+                        )
                 return False, f"注册回调落地失败: {followed}"
             self.last_registration_state = followed
             callback_url = self._pick_best_callback_url(
@@ -954,6 +1118,9 @@ class ChatGPTClient:
             if manual_tokens and manual_tokens.get("access_token"):
                 self._log("next-auth 会话未落地，但手动换码已成功，直接返回 OAuth tokens")
                 return True, self._build_oauth_token_result(manual_tokens)
+            if self.refresh_token:
+                self._log("next-auth 会话未落地，但已捕获 refresh_token，保留 RT 返回")
+                return True, self._build_refresh_token_only_result(self.refresh_token)
             return False, "缺少 __Secure-next-auth.session-token，注册回调可能未落地"
 
         # 尝试从 Cookie 中补齐 refresh_token（针对新版 oaistb_rt_）
@@ -968,6 +1135,12 @@ class ChatGPTClient:
             if manual_tokens and manual_tokens.get("access_token"):
                 self._log(f"/api/auth/session 未成功，改用手动换码结果: {session_or_error}")
                 return True, self._build_oauth_token_result(manual_tokens, session_token=session_cookie)
+            if self.refresh_token:
+                self._log(f"/api/auth/session 未成功，但已捕获 refresh_token，保留 RT 返回: {session_or_error}")
+                return True, self._build_refresh_token_only_result(
+                    self.refresh_token,
+                    session_token=session_cookie,
+                )
             return False, session_or_error
 
         session_data = session_or_error
@@ -1015,8 +1188,10 @@ class ChatGPTClient:
         url = f"{self.BASE}/"
         try:
             self._browser_pause()
-            r = self.session.get(
+            r = self._request_with_proxy_retry(
+                "get",
                 url,
+                retry_label="visit homepage",
                 headers=self._headers(
                     url,
                     accept="text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -1036,8 +1211,10 @@ class ChatGPTClient:
         self._log("获取 CSRF token...")
         url = f"{self.BASE}/api/auth/csrf"
         try:
-            r = self.session.get(
+            r = self._request_with_proxy_retry(
+                "get",
                 url,
+                retry_label="get csrf",
                 headers=self._headers(
                     url,
                     accept="application/json",
@@ -1083,8 +1260,10 @@ class ChatGPTClient:
 
         try:
             self._browser_pause()
-            r = self.session.post(
+            r = self._request_with_proxy_retry(
+                "post",
                 url,
+                retry_label="signin openai",
                 params=params,
                 data=form_data,
                 headers=self._headers(
@@ -1150,8 +1329,10 @@ class ChatGPTClient:
                     self._log("访问 authorize URL...")
 
                 self._browser_pause()
-                r = self.session.get(
+                r = self._request_with_proxy_retry(
+                    "get",
                     url,
+                    retry_label="authorize",
                     headers=self._headers(
                         url,
                         accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1198,8 +1379,10 @@ class ChatGPTClient:
         self._ensure_nextauth_callback_cookie()
         try:
             self._browser_pause()
-            response = self.session.get(
+            response = self._request_with_proxy_retry(
+                "get",
                 target_url,
+                retry_label="finalize nextauth callback",
                 headers=self._headers(
                     target_url,
                     accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1226,8 +1409,10 @@ class ChatGPTClient:
 
         try:
             self._browser_pause()
-            home = self.session.get(
+            home = self._request_with_proxy_retry(
+                "get",
                 f"{self.BASE}/",
+                retry_label="finalize nextauth homepage",
                 headers=self._headers(
                     f"{self.BASE}/",
                     accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1327,7 +1512,14 @@ class ChatGPTClient:
         
         try:
             self._browser_pause()
-            r = self.session.post(url, json=payload, headers=headers, timeout=30)
+            r = self._request_with_proxy_retry(
+                "post",
+                url,
+                retry_label="register user",
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
             self._sniff_refresh_token(r)
             self._sync_response_cookies(r)
             
@@ -1374,8 +1566,10 @@ class ChatGPTClient:
 
         try:
             self._browser_pause()
-            r = self.session.get(
+            r = self._request_with_proxy_retry(
+                "get",
                 url,
+                retry_label="send email otp",
                 headers=self._headers(
                     url,
                     accept="application/json, text/plain, */*",
@@ -1402,7 +1596,7 @@ class ChatGPTClient:
         """
         self._log(f"验证 OTP 码: {otp_code}")
         url = f"{self.AUTH}/api/accounts/email-otp/validate"
-        
+
         headers = self._headers(
             url,
             accept="application/json",
@@ -1411,13 +1605,48 @@ class ChatGPTClient:
             content_type="application/json",
             fetch_site="same-origin",
         )
+        sentinel_header = None
+        try:
+            sentinel_header = build_sentinel_token(
+                self.session,
+                self.device_id,
+                flow="email_otp_validate",
+                user_agent=self.ua,
+                sec_ch_ua=self.sec_ch_ua,
+                impersonate=self.impersonate,
+            )
+        except Exception as e:
+            self._log(f"OTP 校验构建 Sentinel Token (纯 Python) 失败: {e}", level="warning")
+
+        if not sentinel_header:
+            try:
+                sentinel = self._fetch_browser_sentinel_artifacts(
+                    flow="email_otp_validate",
+                    page_url=f"{self.AUTH}/email-verification",
+                )
+                sentinel_header = sentinel.token if sentinel else None
+            except Exception as e:
+                self._log(f"OTP 校验 Browser Sentinel 兜底失败: {e}", level="warning")
+
+        if sentinel_header:
+            headers["OpenAI-Sentinel-Token"] = sentinel_header
+        else:
+            self._log("OTP 校验未生成 Sentinel Token，继续使用标准请求头", level="warning")
+
         headers.update(generate_datadog_trace())
         
         payload = {"code": otp_code}
         
         try:
             self._browser_pause()
-            r = self.session.post(url, json=payload, headers=headers, timeout=30)
+            r = self._request_with_proxy_retry(
+                "post",
+                url,
+                retry_label="verify email otp",
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
             self._sniff_refresh_token(r)
             self._sync_response_cookies(r)
             
@@ -1510,7 +1739,14 @@ class ChatGPTClient:
         
         try:
             self._browser_pause()
-            r = self.session.post(url, json=payload, headers=headers, timeout=30)
+            r = self._request_with_proxy_retry(
+                "post",
+                url,
+                retry_label="create account",
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
             self._sniff_refresh_token(r)
             self._sync_response_cookies(r)
             
