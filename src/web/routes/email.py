@@ -242,7 +242,7 @@ def get_email_services_stats():
 
 
 @router.get("/types")
-def get_service_types():
+async def get_service_types():
     """获取支持的邮箱服务类型"""
     return {
         "types": [

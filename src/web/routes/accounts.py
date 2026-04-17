@@ -682,8 +682,6 @@ def _run_batch_codex_auth_repair_async(task_id: str, request_data: Dict[str, Any
             error=str(exc),
             result=result,
         )
-
-
 def _run_batch_refresh_async(task_id: str, request_data: Dict[str, Any]) -> None:
     acquired, running, quota = task_manager.try_acquire_domain_slot("accounts", task_id)
     if not acquired:
@@ -3449,7 +3447,7 @@ def get_codex_auth_async_task(task_id: str):
 
 
 @router.post("/codex-auth/export")
-def export_codex_auth_artifacts(request: BatchCodexAuthRequest):
+async def export_codex_auth_artifacts(request: BatchCodexAuthRequest):
     with get_db() as db:
         accounts = _resolve_codex_auth_accounts(
             db,
@@ -3480,8 +3478,6 @@ def export_codex_auth_artifacts(request: BatchCodexAuthRequest):
             media_type="application/zip",
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
-
-
 # ============== CPA 上传相关 ==============
 
 class CPAUploadRequest(BaseModel):

@@ -840,7 +840,7 @@ def get_all_settings():
 
 
 @router.get("/auto-quick-refresh")
-def get_auto_quick_refresh_settings():
+async def get_auto_quick_refresh_settings():
     settings = get_settings()
     from ..auto_quick_refresh_scheduler import auto_quick_refresh_scheduler
 
@@ -854,7 +854,7 @@ def get_auto_quick_refresh_settings():
 
 
 @router.post("/auto-quick-refresh")
-def update_auto_quick_refresh_settings(request: AutoQuickRefreshSettingsRequest):
+async def update_auto_quick_refresh_settings(request: AutoQuickRefreshSettingsRequest):
     from ..auto_quick_refresh_scheduler import (
         AUTO_MAX_RETRY_LIMIT,
         AUTO_MAX_INTERVAL_MINUTES,
@@ -973,7 +973,7 @@ def test_dynamic_proxy(request: DynamicProxySettings):
 
 
 @router.get("/registration")
-def get_registration_settings():
+async def get_registration_settings():
     """获取注册设置"""
     settings = get_settings()
 
@@ -1004,7 +1004,7 @@ def get_registration_settings():
 
 
 @router.post("/registration")
-def update_registration_settings(request: RegistrationSettings):
+async def update_registration_settings(request: RegistrationSettings):
     """更新注册设置"""
     if request.timeout < 30 or request.timeout > 600:
         raise HTTPException(status_code=400, detail="注册超时时间必须在 30-600 秒之间")

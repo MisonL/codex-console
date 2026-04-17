@@ -6,7 +6,7 @@ import asyncio
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from src.core.register import RegistrationEngine
-from src.database.init_db import init_db
+from src.database.init_db import initialize_database as init_db
 
 def run_test():
     # init_db() 确保数据库就绪

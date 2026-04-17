@@ -754,6 +754,20 @@ class TempMailService(BaseEmailService):
                     subject = parsed["subject"]
                     body_text = parsed["body"]
                     raw_text = parsed["raw"]
+
+                    # 部分部署的列表接口只返回摘要；先补详情，再做 OTP 语义判断。
+                    if mail_id and not (body_text or raw_text):
+                        detail = self._fetch_mail_detail(mail_id=mail_id, jwt=jwt)
+                        if detail:
+                            detail_parsed = self._extract_mail_fields(detail)
+                            detail_ts = self._extract_mail_timestamp(detail)
+                            if detail_ts is not None:
+                                mail_ts = detail_ts
+                            sender = (detail_parsed["sender"] or sender).lower()
+                            subject = detail_parsed["subject"] or subject
+                            body_text = detail_parsed["body"]
+                            raw_text = detail_parsed["raw"]
+
                     content = f"{sender}\n{subject}\n{body_text}\n{raw_text}".strip()
 
                     # 只处理 OpenAI 验证码类邮件（避免误命中通知类邮件）
@@ -761,28 +775,6 @@ class TempMailService(BaseEmailService):
                         continue
 
                     code, semantic_hit = self._extract_otp_code(content, pattern)
-                    if not code:
-                        # 部分部署列表接口只含摘要；尝试拉单封详情再匹配一次。
-                        detail = self._fetch_mail_detail(mail_id=mail_id, jwt=jwt)
-                        if detail:
-                            detail_parsed = self._extract_mail_fields(detail)
-                            detail_ts = self._extract_mail_timestamp(detail)
-                            if detail_ts is not None:
-                                mail_ts = detail_ts
-                            detail_content = (
-                                f"{detail_parsed['sender']}\n"
-                                f"{detail_parsed['subject']}\n"
-                                f"{detail_parsed['body']}\n"
-                                f"{detail_parsed['raw']}"
-                            ).strip()
-                            if not self._is_openai_otp_mail(
-                                detail_parsed["sender"],
-                                detail_parsed["subject"],
-                                detail_parsed["body"],
-                                detail_parsed["raw"],
-                            ):
-                                continue
-                            code, semantic_hit = self._extract_otp_code(detail_content, pattern)
 
                     if not code:
                         continue

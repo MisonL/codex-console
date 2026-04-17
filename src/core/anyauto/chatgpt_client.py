@@ -1253,6 +1253,18 @@ class ChatGPTClient:
         """
         self._log(f"注册用户: {email}")
         url = f"{self.AUTH}/api/accounts/user/register"
+        sentinel_token = build_sentinel_token(
+            self.session,
+            self.device_id,
+            flow="authorize_continue",
+            user_agent=self.ua,
+            sec_ch_ua=self.sec_ch_ua,
+            impersonate=self.impersonate,
+        )
+        if sentinel_token:
+            self._log("register_user: 已生成 sentinel token")
+        else:
+            self._log("register_user: 未生成 sentinel token，降级继续请求")
         
         sentinel_header = None
         sentinel = None
@@ -1306,7 +1318,6 @@ class ChatGPTClient:
         )
         if sentinel and getattr(sentinel, "passkey_capabilities", None):
             headers["ext-passkey-client-capabilities"] = sentinel.passkey_capabilities
-
         headers.update(generate_datadog_trace())
         
         payload = {

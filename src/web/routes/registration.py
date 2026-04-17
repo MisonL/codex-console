@@ -2342,7 +2342,7 @@ def get_registration_stats():
 
 
 @router.get("/available-services")
-def get_available_email_services():
+async def get_available_email_services():
     """
     获取可用于注册的邮箱服务列表
 
@@ -2356,10 +2356,14 @@ def get_available_email_services():
     from ...config.settings import get_settings
 
     settings = get_settings()
+    tempmail_enabled = bool(getattr(settings, "tempmail_enabled", True))
+    yyds_mail_enabled = bool(getattr(settings, "yyds_mail_enabled", False))
+    yyds_mail_api_key = getattr(settings, "yyds_mail_api_key", None)
+    yyds_mail_default_domain = getattr(settings, "yyds_mail_default_domain", "")
     result = {
         "tempmail": {
-            "available": bool(settings.tempmail_enabled),
-            "count": 1 if settings.tempmail_enabled else 0,
+            "available": tempmail_enabled,
+            "count": 1 if tempmail_enabled else 0,
             "services": (
                 [
                     {
@@ -2369,7 +2373,7 @@ def get_available_email_services():
                         "description": "临时邮箱，自动创建",
                     }
                 ]
-                if settings.tempmail_enabled
+                if tempmail_enabled
                 else []
             ),
         },
@@ -2385,11 +2389,11 @@ def get_available_email_services():
     }
 
     yyds_api_key = (
-        settings.yyds_mail_api_key.get_secret_value()
-        if settings.yyds_mail_api_key
+        yyds_mail_api_key.get_secret_value()
+        if yyds_mail_api_key
         else ""
     )
-    if settings.yyds_mail_enabled and yyds_api_key:
+    if yyds_mail_enabled and yyds_api_key:
         result["yyds_mail"]["available"] = True
         result["yyds_mail"]["count"] = 1
         result["yyds_mail"]["services"].append(
@@ -2397,7 +2401,7 @@ def get_available_email_services():
                 "id": None,
                 "name": "YYDS Mail",
                 "type": "yyds_mail",
-                "default_domain": settings.yyds_mail_default_domain or None,
+                "default_domain": yyds_mail_default_domain or None,
                 "description": "YYDS Mail API 临时邮箱",
             }
         )

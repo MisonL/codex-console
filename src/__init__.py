@@ -1,6 +1,6 @@
 """Project package."""
 
-__version__ = "1.1.2"
+__version__ = "2.7.8"
 __author__ = "Yasal"
 
 __all__ = [

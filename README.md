@@ -6,7 +6,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-v1.1.2-2563eb.svg)](https://github.com/dou-jiang/codex-console/releases/tag/v1.1.2)
+[![Version](https://img.shields.io/badge/version-v2.7.8-2563eb.svg)](https://github.com/dou-jiang/codex-console)
+
+当前开发版本：`v2.7.8`（未发版）。当前版本号用于本地开发分支、集成验证和后续提交整理，不代表已创建对应 Release 或 Tag。
 
 ## 项目地址
 
