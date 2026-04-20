@@ -578,7 +578,8 @@
                                     </div>
                                     <small class="hint">
                                         地址支持只填 Workers 根域名，后端会自动补全常见路径并重试；
-                                        若留空则自动使用默认地址。API Key 为空时也会先尝试无鉴权调用；
+                                        若留空则自动使用默认地址。生产模式默认仅接受受信任的 HTTPS 地址；
+                                        API Key 为空时也会先尝试无鉴权调用；
                                         同时仍支持环境变量
                                         <code>BIND_CARD_API_URL</code>/<code>BIND_CARD_API_KEY</code>。
                                     </small>
@@ -587,7 +588,7 @@
                                     <div class="form-row">
                                         <div class="form-group">
                                             <label for="vendor-checkout-input">自定义 Checkout（可选）</label>
-                                            <input id="vendor-checkout-input" type="text" placeholder="留空则按账号套餐自动生成官方 Checkout" autocomplete="url">
+                                            <input id="vendor-checkout-input" type="text" placeholder="仅作外部卡商参考；官方 Checkout 仍由后端生成" autocomplete="url">
                                         </div>
                                         <div class="form-group">
                                             <label for="vendor-redeem-input">兑换码（必填）</label>
@@ -596,7 +597,7 @@
                                     </div>
                                     <small class="hint">
                                         兑换码格式：<code>XXXX-XXXX-XXXX-XXXX</code>。
-                                        若首次订阅失败，可直接再次点击“订阅”重试。
+                                        自定义 Checkout 不会覆盖官方支付主链；兑换码与临时链接仅保留在当前页面会话。
                                     </small>
                                 </div>
                                 <div id="vendor-efun-config" class="vendor-mode-panel" style="display:none;">
@@ -618,7 +619,7 @@
                                         </div>
                                     </div>
                                     <div id="efun-result-box" class="efun-result"></div>
-                                    <small class="hint">说明：点击“订阅”后将走接口流程：强制生成 Checkout（代理）→ EFun 开卡 → 调用 bindcard 接口 → 同步订阅。</small>
+                                    <small class="hint">说明：点击“订阅”后将走接口流程：强制生成 Checkout（代理）→ EFun 开卡 → 调用 bindcard 接口 → 同步订阅。API Key 与兑换码仅保留在当前页面会话。</small>
                                 </div>
                             </div>
 
@@ -846,5 +847,4 @@ CVV 123
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
 

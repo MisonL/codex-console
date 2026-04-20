@@ -107,7 +107,7 @@ def test_templates_include_semantic_autocomplete_for_key_inputs():
         "payment.html": (
             'id="workspace-name" value="MyTeam" placeholder="MyTeam" autocomplete="organization"',
             'id="third-party-api-url" type="text" placeholder="https://twilight-river-f148.482091502.workers.dev/" autocomplete="url"',
-            'id="vendor-checkout-input" type="text" placeholder="留空则按账号套餐自动生成官方 Checkout" autocomplete="url"',
+            'id="vendor-checkout-input" type="text" placeholder="仅作外部卡商参考；官方 Checkout 仍由后端生成" autocomplete="url"',
             'id="billing-paste-text"',
             'id="card-number-input" type="text" autocomplete="cc-number"',
             'id="card-expiry-input" type="text" autocomplete="cc-exp"',

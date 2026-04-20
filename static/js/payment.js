@@ -121,6 +121,38 @@ let bindTaskLoadPromise = null;
 
 let billingBatchProfiles = [];
 
+function getSessionStorageValue(key, defaultValue = "") {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw !== null ? JSON.parse(raw) : defaultValue;
+  } catch {
+    return defaultValue;
+  }
+}
+
+function setSessionStorageValue(key, value) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function loadEphemeralPaymentValue(key, fallback = "") {
+  const sessionValue = getSessionStorageValue(key, null);
+  if (sessionValue !== null && sessionValue !== undefined) {
+    storage.remove(key);
+    return sessionValue;
+  }
+  const legacyValue = storage.get(key, fallback);
+  if (legacyValue !== null && legacyValue !== undefined && legacyValue !== "") {
+    setSessionStorageValue(key, legacyValue);
+  }
+  storage.remove(key);
+  return legacyValue;
+}
+
 function formatErrorMessage(error) {
   if (!error) return "未知错误";
   if (typeof error === "string") return error;
@@ -2010,7 +2042,7 @@ function resolveEfunCodeFromInputOrPool() {
   const code = normalizeEfunCode(picked.code);
   if (code) {
     setInputValue("efun-code-input", code);
-    storage.set(EFUN_CODE_STORAGE_KEY, code);
+    setSessionStorageValue(EFUN_CODE_STORAGE_KEY, code);
   }
   return { code, source: "pool" };
 }
@@ -2108,7 +2140,7 @@ async function redeemEfunAndFill(showToast = true, overrideConfig = null) {
   if (!getInputValue("billing-currency-input"))
     setInputValue("billing-currency-input", "USD");
 
-  storage.set(EFUN_CODE_STORAGE_KEY, config.code);
+  setSessionStorageValue(EFUN_CODE_STORAGE_KEY, config.code);
   storage.set(
     EFUN_BASE_URL_STORAGE_KEY,
     String(config.base_url || EFUN_BASE_URL_DEFAULT),
@@ -2319,10 +2351,10 @@ function restoreBindModeConfig() {
   }
 
   const savedVendorCheckout = String(
-    storage.get(VENDOR_CHECKOUT_STORAGE_KEY, "") || "",
+    loadEphemeralPaymentValue(VENDOR_CHECKOUT_STORAGE_KEY, "") || "",
   ).trim();
   const savedRedeemCode = normalizeVendorRedeemCode(
-    String(storage.get(VENDOR_REDEEM_STORAGE_KEY, "") || "").trim(),
+    String(loadEphemeralPaymentValue(VENDOR_REDEEM_STORAGE_KEY, "") || "").trim(),
   );
   setInputValue("vendor-checkout-input", savedVendorCheckout);
   setInputValue("vendor-redeem-input", savedRedeemCode);
@@ -2335,12 +2367,12 @@ function restoreBindModeConfig() {
   );
   setInputValue(
     "efun-api-key-input",
-    String(storage.get(EFUN_API_KEY_STORAGE_KEY, "") || "").trim(),
+    String(loadEphemeralPaymentValue(EFUN_API_KEY_STORAGE_KEY, "") || "").trim(),
   );
   setInputValue(
     "efun-code-input",
     normalizeEfunCode(
-      String(storage.get(EFUN_CODE_STORAGE_KEY, "") || "").trim(),
+      String(loadEphemeralPaymentValue(EFUN_CODE_STORAGE_KEY, "") || "").trim(),
     ),
   );
 
@@ -2459,7 +2491,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("vendor-checkout-input")?.addEventListener(
     "input",
     debounce(() => {
-      storage.set(
+      setSessionStorageValue(
         VENDOR_CHECKOUT_STORAGE_KEY,
         getInputValue("vendor-checkout-input"),
       );
@@ -2472,7 +2504,7 @@ document.addEventListener("DOMContentLoaded", () => {
         getInputValue("vendor-redeem-input"),
       );
       setInputValue("vendor-redeem-input", normalized);
-      storage.set(VENDOR_REDEEM_STORAGE_KEY, normalized);
+      setSessionStorageValue(VENDOR_REDEEM_STORAGE_KEY, normalized);
     }, 200),
   );
   document.getElementById("efun-base-url-input")?.addEventListener(
@@ -2485,7 +2517,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("efun-api-key-input")?.addEventListener(
     "input",
     debounce(() => {
-      storage.set(
+      setSessionStorageValue(
         EFUN_API_KEY_STORAGE_KEY,
         String(getInputValue("efun-api-key-input") || "").trim(),
       );
@@ -2496,7 +2528,7 @@ document.addEventListener("DOMContentLoaded", () => {
     debounce(() => {
       const normalized = normalizeEfunCode(getInputValue("efun-code-input"));
       setInputValue("efun-code-input", normalized);
-      storage.set(EFUN_CODE_STORAGE_KEY, normalized);
+      setSessionStorageValue(EFUN_CODE_STORAGE_KEY, normalized);
       renderEfunPoolHint();
     }, 200),
   );
@@ -2873,7 +2905,7 @@ async function createBindCardTask() {
     efunConfig.code = resolvedCode;
     vendorConfigForRun.redeem_code = resolvedCode;
     setInputValue("efun-code-input", resolvedCode);
-    storage.set(EFUN_CODE_STORAGE_KEY, resolvedCode);
+    setSessionStorageValue(EFUN_CODE_STORAGE_KEY, resolvedCode);
     if (!EFUN_CODE_REGEX.test(String(efunConfig.code || ""))) {
       toast.warning("CDK 格式无效");
       return;
