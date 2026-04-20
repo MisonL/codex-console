@@ -1292,33 +1292,17 @@ class ChatGPTClient:
     
     def authorize(self, url, max_retries=3):
         """
-        访问 authorize URL，并强制注入我们控制的 PKCE 挑战码
+        访问 authorize URL，跟随重定向并复用服务端下发的 PKCE 状态
         """
         import urllib.parse
-        from .oauth_client import generate_pkce
-        
+
         parsed = urllib.parse.urlparse(url)
         query = urllib.parse.parse_qs(parsed.query)
-        
+
         # 保存原始的 client_id 和 redirect_uri，供后续换码使用
         self.last_oauth_client_id = query.get("client_id", [None])[0]
         self.last_oauth_redirect_uri = query.get("redirect_uri", [None])[0]
         self.last_oauth_state = query.get("state", [None])[0]
-        
-        # 核心：如果我们能生成自己的挑战码，就替换掉它
-        code_verifier, code_challenge = generate_pkce()
-        self.last_code_verifier = code_verifier
-        self._sync_nextauth_pkce_cookie(code_verifier)
-        self._log(f"🔥 [CODEX] 正在拦截 Authorize URL (ClientID: {self.last_oauth_client_id}) 并注入自定义 PKCE...")
-        
-        query["code_challenge"] = [code_challenge]
-        query["code_challenge_method"] = ["S256"]
-        
-        # 重组 URL
-        new_query = urllib.parse.urlencode(query, doseq=True)
-        new_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
-        
-        url = new_url # 使用拦截后的新 URL
 
         for attempt in range(max_retries):
             try:
@@ -1343,22 +1327,29 @@ class ChatGPTClient:
                     timeout=30,
                 )
                 self._sync_response_cookies(r)
-                
+
+                pkce_verifier = (
+                    self._get_cookie_value("__Secure-next-auth.pkce.code_verifier", "chatgpt.com")
+                    or self._get_cookie_value("next-auth.pkce.code_verifier", "chatgpt.com")
+                )
+                if pkce_verifier:
+                    self.last_code_verifier = pkce_verifier
+
                 final_url = str(r.url)
                 self._log(f"重定向到: {final_url}")
                 return final_url
-                
+
             except Exception as e:
                 error_msg = str(e)
                 is_tls_error = "TLS" in error_msg or "SSL" in error_msg or "curl: (35)" in error_msg
-                
+
                 if is_tls_error and attempt < max_retries - 1:
                     self._log(f"Authorize TLS 错误 (尝试 {attempt + 1}/{max_retries}): {error_msg[:100]}")
                     continue
                 else:
                     self._log(f"Authorize 失败: {e}")
                     return ""
-        
+
         return ""
     
     def callback(self, callback_url=None, referer=None):
@@ -1497,12 +1488,10 @@ class ChatGPTClient:
             fetch_site="same-origin",
             extra_headers={
                 "oai-device-id": self.device_id,
-                "OpenAI-Device-Id": self.device_id,
-                "OpenAI-Sentinel-Token": sentinel_header,
             },
         )
-        if sentinel and getattr(sentinel, "passkey_capabilities", None):
-            headers["ext-passkey-client-capabilities"] = sentinel.passkey_capabilities
+        if sentinel_header:
+            headers["openai-sentinel-token"] = sentinel_header
         headers.update(generate_datadog_trace())
         
         payload = {
@@ -1791,7 +1780,18 @@ class ChatGPTClient:
             self._log(f"创建异常: {e}")
             return False, str(e)
     
-    def register_complete_flow(self, email, password, first_name, last_name, birthdate, skymail_client):
+    def register_complete_flow(
+        self,
+        email,
+        password,
+        first_name,
+        last_name,
+        birthdate,
+        skymail_client,
+        stop_before_about_you_submission=False,
+        otp_wait_timeout=300,
+        otp_resend_wait_timeout=90,
+    ):
         """
         完整的注册流程（基于原版 run_register 方法）
         
@@ -1802,6 +1802,9 @@ class ChatGPTClient:
             last_name: 姓
             birthdate: 生日
             skymail_client: Skymail 客户端（用于获取验证码）
+            stop_before_about_you_submission: 是否在 about_you 页面停止并交由后续 OAuth 流程承接
+            otp_wait_timeout: 注册阶段 OTP 总等待秒数
+            otp_resend_wait_timeout: 注册阶段每轮 OTP 等待秒数，超时后自动重发
             
         Returns:
             tuple: (success, message)
@@ -1889,15 +1892,19 @@ class ChatGPTClient:
                 continue
 
             if self._state_is_email_otp(state):
-                self._log("进入收码阶段，总等待时间 300s，每 90s 自动重试发送...")
+                self._log(
+                    "进入收码阶段，"
+                    f"总等待时间 {int(otp_wait_timeout)}s，"
+                    f"每 {int(otp_resend_wait_timeout)}s 自动重试发送..."
+                )
                 
                 # 重置收码起始时间，确保过滤掉旧邮件
                 if hasattr(skymail_client, "reset_start_time"):
                     skymail_client.reset_start_time()
                 
                 otp_code = None
-                max_total_wait = 300  # 延长到 5 分钟
-                resend_interval = 90  # 90 秒重发一次
+                max_total_wait = max(30, int(otp_wait_timeout or 300))
+                resend_interval = max(15, int(otp_resend_wait_timeout or 90))
                 start_wait_time = time.time()
                 tried_codes = set()
                 
@@ -1926,6 +1933,10 @@ class ChatGPTClient:
                 return False, f"收码或校验超时 ({max_total_wait}s)"
 
             if self._state_is_about_you(state):
+                if stop_before_about_you_submission:
+                    self.last_registration_state = state
+                    self._log("注册链路已到 about_you，停止提交资料，交由 OAuth 流程继续")
+                    return True, "pending_about_you_submission"
                 self._log(f"检测到 about-you 阶段，正在提交用户信息: {first_name} {last_name}")
                 success, next_state = self.create_account(
                     first_name,

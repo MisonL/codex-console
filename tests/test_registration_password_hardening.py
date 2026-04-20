@@ -249,8 +249,10 @@ def test_anyauto_register_user_sends_device_and_sentinel_headers(monkeypatch):
     assert url == "https://auth.openai.com/api/accounts/user/register"
     assert kwargs["json"] == {"username": "tester@example.com", "password": "Aa1!fixedPwd"}
     assert kwargs["headers"]["oai-device-id"] == "did-456"
-    assert kwargs["headers"]["OpenAI-Sentinel-Token"] == '{"id":"did-456","flow":"username_password_create","c":"sentinel"}'
-    assert kwargs["headers"]["ext-passkey-client-capabilities"] == '{"conditionalGet":true}'
+    assert kwargs["headers"]["openai-sentinel-token"] == '{"id":"did-456","flow":"username_password_create","c":"sentinel"}'
+    assert "OpenAI-Sentinel-Token" not in kwargs["headers"]
+    assert "OpenAI-Device-Id" not in kwargs["headers"]
+    assert "ext-passkey-client-capabilities" not in kwargs["headers"]
     assert kwargs["headers"]["x-trace-id"] == "trace-1"
 
 

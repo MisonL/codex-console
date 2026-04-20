@@ -543,7 +543,13 @@ class AnyAutoRegistrationEngine:
 
                 self._log("步骤 1/2: 执行注册状态机...")
                 success, msg = chatgpt_client.register_complete_flow(
-                    normalized_email, self.password, first_name, last_name, birthdate, skymail_adapter
+                    normalized_email,
+                    self.password,
+                    first_name,
+                    last_name,
+                    birthdate,
+                    skymail_adapter,
+                    stop_before_about_you_submission=True,
                 )
                 if not success:
                     last_error = f"注册流失败: {msg}"
@@ -569,93 +575,8 @@ class AnyAutoRegistrationEngine:
                 self.device_id = chatgpt_client.device_id
                 salvage_state = "pending_phone" if add_phone_required else "pending_about_you"
 
-                if add_phone_required or interrupted_for_reauth:
-                    if interrupted_for_reauth:
-                        self._log("捕获到注册中断信号，立即启动 Passwordless OAuth 接力流程...")
-                    else:
-                        self._log("检测到账号需要手机号验证，尝试通过 Passwordless OAuth 补全流程...")
-                        
-                    pwdless = self._passwordless_oauth_reauth(
-                        chatgpt_client,
-                        normalized_email,
-                        skymail_adapter,
-                        oauth_config,
-                    )
-                    if pwdless and pwdless.get("access_token") and pwdless.get("refresh_token"):
-                        self.session = pwdless.get("session") or self.session
-                        return {
-                            "success": True,
-                            "state": "active",
-                            "access_token": pwdless.get("access_token", ""),
-                            "refresh_token": pwdless.get("refresh_token", ""),
-                            "id_token": pwdless.get("id_token", ""),
-                            "session_token": pwdless.get("session_token", ""),
-                            "account_id": pwdless.get("account_id", ""),
-                            "workspace_id": pwdless.get("workspace_id", ""),
-                            "metadata": pwdless.get("metadata") or {},
-                        }
-                    if self._is_account_deactivated_error(getattr(self, "_last_passwordless_error", "")):
-                        return {"success": False, "error_message": "account_deactivated"}
-
-                # 5. 复用 session 取 token
-                self._log("步骤 2/2: 复用注册会话，优先走 callback 落地 + PKCE 换码...")
-                session_ok, session_result = chatgpt_client.reuse_session_and_get_tokens()
-                if session_ok:
-                    resolved_refresh_token = str(
-                        chatgpt_client.refresh_token or session_result.get("refresh_token", "") or ""
-                    ).strip()
-                    if resolved_refresh_token:
-                        self._log(f"已持有持久化 RT: {resolved_refresh_token[:20]}...")
-                        account_id = str(session_result.get("account_id", "") or "").strip()
-                        if not account_id:
-                            account_id = str(session_result.get("workspace_id", "") or "").strip()
-                        if not account_id:
-                            account_id = self._extract_account_id_from_token(session_result.get("access_token", ""))
-                        workspace_id = str(session_result.get("workspace_id", "") or "").strip() or account_id
-                        return {
-                            "success": True,
-                            "state": "active",
-                            "access_token": session_result.get("access_token", ""),
-                            "refresh_token": resolved_refresh_token,
-                            "session_token": session_result.get("session_token", ""),
-                            "account_id": account_id,
-                            "workspace_id": workspace_id,
-                            "metadata": {
-                                "auth_provider": session_result.get("auth_provider", ""),
-                                "expires": session_result.get("expires", ""),
-                                "user_id": session_result.get("user_id", ""),
-                                "user": session_result.get("user") or {},
-                                "account": session_result.get("account") or {},
-                            },
-                        }
-
-                    self._log("复用会话已拿到 Access Token，但未产出 RT，转入显式 OAuth 补全流程...")
-                elif self._is_account_deactivated_error(session_result):
-                    return {"success": False, "error_message": "account_deactivated"}
-
-                preserved_refresh_token = str(getattr(chatgpt_client, "refresh_token", "") or "").strip()
-                if preserved_refresh_token:
-                    self._log("复用会话未完成 session 落地，但已捕获 RT，停止重 OAuth salvage 并保留 RT")
-                    return {
-                        "success": True,
-                        "state": "active",
-                        "access_token": str((session_result or {}).get("access_token") or ""),
-                        "refresh_token": preserved_refresh_token,
-                        "id_token": str((session_result or {}).get("id_token") or ""),
-                        "session_token": str((session_result or {}).get("session_token") or ""),
-                        "account_id": str((session_result or {}).get("account_id") or ""),
-                        "workspace_id": str((session_result or {}).get("workspace_id") or ""),
-                        "metadata": {
-                            "auth_provider": str((session_result or {}).get("auth_provider") or "captured_refresh_token"),
-                            "token_pending": True,
-                            "salvage_skipped": True,
-                            "salvage_skip_reason": "refresh_token_already_captured",
-                            "session_error": str(session_result or ""),
-                        },
-                    }
-
-                # 6. OAuth 回退
-                self._log(f"复用会话未完成 RT 产出，回退到 OAuth 登录补全流程: {session_result}")
+                # 5. OAuth 主链路：复用注册阶段上下文，在 OAuth 会话继续提交 about_you / workspace / token
+                self._log("步骤 2/2: 沿用注册上下文，直接进入 OAuth 接续流程...")
                 tokens = None
                 oauth_client = None
                 for oauth_attempt in range(2):
@@ -680,6 +601,9 @@ class AnyAutoRegistrationEngine:
                         chatgpt_client.sec_ch_ua,
                         chatgpt_client.impersonate,
                         skymail_adapter,
+                        first_name=first_name,
+                        last_name=last_name,
+                        birthdate=birthdate,
                     )
                     if tokens and tokens.get("access_token") and tokens.get("refresh_token"):
                         break
@@ -728,6 +652,63 @@ class AnyAutoRegistrationEngine:
                                 oauth_client=oauth_client,
                                 state="active",
                             ),
+                        },
+                    }
+
+                # 6. 本地增强兜底：OAuth 未完成时，再尝试复用 session / callback salvage
+                self._log("OAuth 接续未完成，转入本地 session salvage 兜底...")
+                session_ok, session_result = chatgpt_client.reuse_session_and_get_tokens()
+                if session_ok:
+                    resolved_refresh_token = str(
+                        chatgpt_client.refresh_token or session_result.get("refresh_token", "") or ""
+                    ).strip()
+                    if resolved_refresh_token:
+                        self._log(f"已持有持久化 RT: {resolved_refresh_token[:20]}...")
+                        account_id = str(session_result.get("account_id", "") or "").strip()
+                        if not account_id:
+                            account_id = str(session_result.get("workspace_id", "") or "").strip()
+                        if not account_id:
+                            account_id = self._extract_account_id_from_token(session_result.get("access_token", ""))
+                        workspace_id = str(session_result.get("workspace_id", "") or "").strip() or account_id
+                        return {
+                            "success": True,
+                            "state": "active",
+                            "access_token": session_result.get("access_token", ""),
+                            "refresh_token": resolved_refresh_token,
+                            "session_token": session_result.get("session_token", ""),
+                            "account_id": account_id,
+                            "workspace_id": workspace_id,
+                            "metadata": {
+                                "auth_provider": session_result.get("auth_provider", ""),
+                                "expires": session_result.get("expires", ""),
+                                "user_id": session_result.get("user_id", ""),
+                                "user": session_result.get("user") or {},
+                                "account": session_result.get("account") or {},
+                                "salvage_path": "reuse_session_after_oauth_failure",
+                            },
+                        }
+                elif self._is_account_deactivated_error(session_result):
+                    return {"success": False, "error_message": "account_deactivated"}
+
+                preserved_refresh_token = str(getattr(chatgpt_client, "refresh_token", "") or "").strip()
+                if preserved_refresh_token:
+                    self._log("session salvage 未完成 session 落地，但已捕获 RT，保留当前 RT")
+                    return {
+                        "success": True,
+                        "state": "active",
+                        "access_token": str((session_result or {}).get("access_token") or ""),
+                        "refresh_token": preserved_refresh_token,
+                        "id_token": str((session_result or {}).get("id_token") or ""),
+                        "session_token": str((session_result or {}).get("session_token") or ""),
+                        "account_id": str((session_result or {}).get("account_id") or ""),
+                        "workspace_id": str((session_result or {}).get("workspace_id") or ""),
+                        "metadata": {
+                            "auth_provider": str((session_result or {}).get("auth_provider") or "captured_refresh_token"),
+                            "token_pending": True,
+                            "salvage_skipped": True,
+                            "salvage_skip_reason": "refresh_token_already_captured",
+                            "session_error": str(session_result or ""),
+                            "salvage_path": "captured_refresh_token_after_oauth_failure",
                         },
                     }
 

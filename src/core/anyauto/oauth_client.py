@@ -539,6 +539,10 @@ class OAuthClient:
         target = f"{state.continue_url} {state.current_url}".lower()
         return state.page_type == "email_otp_verification" or "email-verification" in target or "email-otp" in target
 
+    def _state_is_about_you(self, state: FlowState):
+        target = f"{state.continue_url} {state.current_url}".lower()
+        return state.page_type == "about_you" or "about-you" in target
+
     def _state_is_add_phone(self, state: FlowState):
         target = f"{state.continue_url} {state.current_url}".lower()
         return state.page_type == "add_phone" or "add-phone" in target
@@ -932,6 +936,119 @@ class OAuthClient:
         except Exception as e:
             self._set_error(f"密码验证异常: {e}")
             return None
+
+    def _submit_about_you_create_account(
+        self,
+        first_name,
+        last_name,
+        birthdate,
+        device_id,
+        *,
+        user_agent=None,
+        sec_ch_ua=None,
+        impersonate=None,
+        referer=None,
+    ):
+        full_name = f"{str(first_name or '').strip()} {str(last_name or '').strip()}".strip()
+        birthdate = str(birthdate or "").strip()
+        if not full_name or not birthdate:
+            self._set_error("about_you 资料不完整: 缺少姓名或生日")
+            return None
+
+        device_id = str(device_id or self.device_id or "").strip()
+        about_you_url = f"{self.oauth_issuer}/about-you"
+        request_url = f"{self.oauth_api_base}/api/accounts/create_account"
+
+        sentinel_token = None
+        try:
+            self._log("步骤5: 命中 about_you，提交姓名和生日完成注册")
+            self._log("尝试使用纯 Python PoW (Node VM) 获取 Token, flow=oauth_create_account")
+            sentinel_token = build_sentinel_token(
+                self.session,
+                device_id,
+                flow="oauth_create_account",
+                user_agent=user_agent,
+                sec_ch_ua=sec_ch_ua,
+                impersonate=impersonate,
+            )
+            if sentinel_token:
+                self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            else:
+                self._log("纯 Python PoW 算法返回了空 Token，准备降级到浏览器", "warning")
+        except Exception as e:
+            self._log(f"纯 Python PoW 算法异常: {e}", "warning")
+
+        if not sentinel_token:
+            self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")
+            sentinel = self._fetch_browser_sentinel_artifacts(
+                flow="oauth_create_account",
+                page_url=referer or about_you_url,
+                device_id=device_id,
+                user_agent=user_agent,
+                include_session_observer=True,
+            )
+            sentinel_token = sentinel.token if sentinel else None
+            self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel_token)}")
+
+        if not sentinel_token:
+            self._set_error("无法获取 sentinel token (oauth_create_account)")
+            return None
+
+        headers = self._headers(
+            request_url,
+            user_agent=user_agent,
+            sec_ch_ua=sec_ch_ua,
+            accept="application/json",
+            referer=referer or about_you_url,
+            origin=self.oauth_issuer,
+            content_type="application/json",
+            fetch_site="same-origin",
+            extra_headers={
+                "oai-device-id": device_id,
+                "openai-sentinel-token": sentinel_token,
+            },
+        )
+        headers.update(generate_datadog_trace())
+
+        try:
+            kwargs = {
+                "json": {"name": full_name, "birthdate": birthdate},
+                "headers": headers,
+                "timeout": 30,
+                "allow_redirects": False,
+            }
+            if impersonate:
+                kwargs["impersonate"] = impersonate
+
+            self._browser_pause(0.12, 0.25)
+            resp = self._request_with_proxy_retry(
+                "post",
+                request_url,
+                retry_label="/create_account",
+                **kwargs,
+            )
+            self._sync_response_cookies(resp)
+            self._log(f"/create_account -> {resp.status_code}")
+            if self._response_hits_account_deactivated(resp, "/create_account"):
+                return None
+
+            if resp.status_code != 200:
+                self._set_error(f"about_you 提交失败: {resp.status_code} - {resp.text[:180]}")
+                return None
+
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+
+            next_state = self._state_from_payload(data, current_url=str(resp.url) or request_url)
+            if self._state_hits_account_deactivated(next_state, "create_account_state"):
+                return None
+            self._log(f"about_you 提交成功 {describe_flow_state(next_state)}")
+            return next_state
+        except Exception as e:
+            self._set_error(f"about_you 提交异常: {e}")
+            return None
     
     def login_and_get_tokens(
         self,
@@ -943,6 +1060,9 @@ class OAuthClient:
         impersonate=None,
         skymail_client=None,
         _continue_depth=0,
+        first_name=None,
+        last_name=None,
+        birthdate=None,
     ):
         """
         完整的 OAuth 登录流程，获取 tokens
@@ -1088,6 +1208,25 @@ class OAuthClient:
                 if not next_state:
                     if not self.last_error:
                         self._set_error("邮箱 OTP 验证后未进入下一步 OAuth 状态")
+                    return None
+                referer = state.current_url or referer
+                state = next_state
+                continue
+
+            if self._state_is_about_you(state):
+                next_state = self._submit_about_you_create_account(
+                    first_name,
+                    last_name,
+                    birthdate,
+                    device_id,
+                    user_agent=user_agent,
+                    sec_ch_ua=sec_ch_ua,
+                    impersonate=impersonate,
+                    referer=state.current_url or state.continue_url or referer,
+                )
+                if not next_state:
+                    if not self.last_error:
+                        self._set_error("about_you 提交后未进入下一步 OAuth 状态")
                     return None
                 referer = state.current_url or referer
                 state = next_state

@@ -1,5 +1,6 @@
 from src.core.anyauto import chatgpt_client as chatgpt_client_module
 from src.core.anyauto import oauth_client as oauth_client_module
+from src.core.anyauto import register_flow as register_flow_module
 from src.core.anyauto.chatgpt_client import ChatGPTClient
 from src.core.anyauto.oauth_client import OAuthClient
 from src.core.anyauto.register_flow import AnyAutoRegistrationEngine
@@ -91,8 +92,16 @@ def _build_chatgpt_client():
     return client
 
 
-def test_authorize_syncs_nextauth_pkce_cookie():
+def test_authorize_captures_nextauth_pkce_cookie_from_response():
     client = _build_chatgpt_client()
+    client.session = DummySession(
+        DummyResponse(
+            "https://auth.openai.com/log-in",
+            headers={
+                "Set-Cookie": "__Secure-next-auth.pkce.code_verifier=verifier-1; Path=/; Domain=.chatgpt.com; Secure"
+            },
+        )
+    )
 
     auth_url = (
         "https://auth.openai.com/oauth/authorize"
@@ -106,7 +115,7 @@ def test_authorize_syncs_nextauth_pkce_cookie():
     assert final_url == "https://auth.openai.com/log-in"
     assert client.last_oauth_client_id == "app_test"
     assert client.last_oauth_state == "state-1"
-    assert client.last_code_verifier
+    assert client.last_code_verifier == "verifier-1"
     assert (
         client.session.cookies.get("__Secure-next-auth.pkce.code_verifier")
         == client.last_code_verifier
@@ -275,6 +284,205 @@ def test_login_and_get_tokens_tries_canonical_consent_after_add_phone(monkeypatc
 
     assert result["refresh_token"] == "oaistb_rt_test_1"
     assert consent_attempts == ["https://auth.openai.com/sign-in-with-chatgpt/codex/consent"]
+
+
+def test_register_complete_flow_stops_before_about_you_submission():
+    client = _build_chatgpt_client()
+    client.visit_homepage = lambda: True
+    client.get_csrf_token = lambda: "csrf-1"
+    client.signin = lambda *_args, **_kwargs: "https://auth.openai.com/oauth/authorize"
+    client.authorize = lambda *_args, **_kwargs: "https://auth.openai.com/create-account/password"
+    client.register_user = lambda *_args, **_kwargs: (True, "注册成功")
+    client.send_email_otp = lambda *_args, **_kwargs: True
+    client.verify_email_otp = lambda *_args, **_kwargs: (
+        True,
+        FlowState(
+            page_type="about_you",
+            current_url="https://auth.openai.com/about-you",
+        ),
+    )
+    client.create_account = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("should not submit about_you in interrupt mode")
+    )
+
+    class Mailbox:
+        def reset_start_time(self):
+            return None
+
+        def wait_for_verification_code(self, *_args, **_kwargs):
+            return "123456"
+
+    success, message = client.register_complete_flow(
+        "tester@example.com",
+        "Pwd!123456",
+        "Olivia",
+        "Johnson",
+        "2005-08-01",
+        Mailbox(),
+        stop_before_about_you_submission=True,
+        otp_wait_timeout=60,
+        otp_resend_wait_timeout=30,
+    )
+
+    assert success is True
+    assert message == "pending_about_you_submission"
+    assert client.last_registration_state.page_type == "about_you"
+
+
+def test_login_and_get_tokens_handles_about_you_before_token_exchange(monkeypatch):
+    client = OAuthClient(
+        config={
+            "oauth_issuer": "https://auth.openai.com",
+            "oauth_client_id": "app_test",
+            "oauth_redirect_uri": "http://localhost:1455/auth/callback",
+        },
+        verbose=False,
+    )
+    client._log = lambda *args, **kwargs: None
+
+    about_you_calls = []
+
+    monkeypatch.setattr(
+        client,
+        "_bootstrap_oauth_session",
+        lambda *args, **kwargs: "https://auth.openai.com/log-in",
+    )
+    monkeypatch.setattr(
+        client,
+        "_submit_authorize_continue",
+        lambda *args, **kwargs: FlowState(
+            page_type="about_you",
+            current_url="https://auth.openai.com/about-you",
+            continue_url="https://auth.openai.com/about-you",
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "_submit_about_you_create_account",
+        lambda first_name, last_name, birthdate, device_id, **kwargs: about_you_calls.append(
+            (first_name, last_name, birthdate, device_id)
+        )
+        or FlowState(
+            page_type="oauth_callback",
+            current_url="http://localhost:1455/auth/callback?code=code-1&state=state-1",
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "_exchange_code_for_tokens",
+        lambda *args, **kwargs: {
+            "access_token": "at-1",
+            "refresh_token": "oaistb_rt_test_2",
+            "id_token": "id-1",
+        },
+    )
+
+    result = client.login_and_get_tokens(
+        "tester@example.com",
+        "Pwd!123456",
+        "did-1",
+        "Mozilla/5.0",
+        '"Chromium";v="136"',
+        "chrome136",
+        skymail_client=object(),
+        first_name="Olivia",
+        last_name="Johnson",
+        birthdate="2005-08-01",
+    )
+
+    assert result["refresh_token"] == "oaistb_rt_test_2"
+    assert about_you_calls == [("Olivia", "Johnson", "2005-08-01", "did-1")]
+
+
+def test_anyauto_run_prefers_oauth_continuation_before_session_salvage(monkeypatch):
+    events = []
+
+    class FakeEmailService:
+        def create_email(self):
+            events.append("create_email")
+            return {"email": "tester@example.com", "service_id": "mail-1"}
+
+    class FakeChatGPTClient:
+        def __init__(self, *args, **kwargs):
+            self.session = object()
+            self.device_id = "did-1"
+            self.ua = "Mozilla/5.0"
+            self.sec_ch_ua = '"Chromium";v="136"'
+            self.impersonate = "chrome136"
+            self.refresh_token = ""
+            self._log = lambda *args, **kwargs: None
+
+        def register_complete_flow(self, *args, **kwargs):
+            events.append(("register", kwargs.get("stop_before_about_you_submission")))
+            return True, "pending_about_you_submission"
+
+        def export_auth_context(self):
+            return {
+                "session": self.session,
+                "device_id": self.device_id,
+                "user_agent": self.ua,
+                "sec_ch_ua": self.sec_ch_ua,
+                "impersonate": self.impersonate,
+                "last_registration_state": FlowState(
+                    page_type="about_you",
+                    current_url="https://auth.openai.com/about-you",
+                ),
+            }
+
+        def reuse_session_and_get_tokens(self):
+            events.append("reuse_session")
+            return False, "should not need salvage"
+
+    class FakeOAuthClient:
+        def __init__(self, *args, **kwargs):
+            self.last_error = ""
+            self.session = None
+            self._log = lambda *args, **kwargs: None
+
+        def apply_auth_context(self, context):
+            events.append(("apply_auth_context", context.get("device_id")))
+            self.session = context.get("session")
+
+        def login_and_get_tokens(self, email, password, device_id, *args, **kwargs):
+            events.append(
+                (
+                    "oauth_login",
+                    email,
+                    device_id,
+                    kwargs.get("first_name"),
+                    kwargs.get("birthdate"),
+                )
+            )
+            return {
+                "access_token": "at-1",
+                "refresh_token": "oaistb_rt_test_3",
+                "id_token": "id-1",
+            }
+
+        def _decode_oauth_session_cookie(self):
+            return {"workspaces": [{"id": "ws-1"}]}
+
+    monkeypatch.setattr(register_flow_module, "ChatGPTClient", FakeChatGPTClient)
+    monkeypatch.setattr(register_flow_module, "OAuthClient", FakeOAuthClient)
+    monkeypatch.setattr(register_flow_module, "generate_random_name", lambda: ("Olivia", "Johnson"))
+    monkeypatch.setattr(register_flow_module, "generate_random_birthday", lambda: "2005-08-01")
+
+    engine = AnyAutoRegistrationEngine(
+        email_service=FakeEmailService(),
+        callback_logger=lambda *_args, **_kwargs: None,
+        max_retries=1,
+    )
+
+    result = engine.run()
+
+    assert result["success"] is True
+    assert result["refresh_token"] == "oaistb_rt_test_3"
+    assert events == [
+        "create_email",
+        ("register", True),
+        ("apply_auth_context", "did-1"),
+        ("oauth_login", "tester@example.com", "did-1", "Olivia", "2005-08-01"),
+    ]
 
 
 def test_authorize_continue_retries_invalid_state(monkeypatch):
