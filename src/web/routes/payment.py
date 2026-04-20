@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import uuid
+from ipaddress import ip_address
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 import time
@@ -43,6 +44,7 @@ router = APIRouter()
 CHECKOUT_SESSION_REGEX = re.compile(r"\bcs_[A-Za-z0-9_-]+\b", re.IGNORECASE)
 THIRD_PARTY_BIND_API_URL_ENV = "BIND_CARD_API_URL"
 THIRD_PARTY_BIND_API_KEY_ENV = "BIND_CARD_API_KEY"
+ALLOW_UNSAFE_THIRD_PARTY_BIND_URLS_ENV = "ALLOW_UNSAFE_THIRD_PARTY_BIND_URLS"
 THIRD_PARTY_BIND_API_DEFAULT = "https://twilight-river-f148.482091502.workers.dev/"
 THIRD_PARTY_BIND_PATH_DEFAULT = "/api/v1/bind-card"
 CHECKOUT_CONNECTIVITY_ERROR_KEYWORDS = (
@@ -1406,6 +1408,42 @@ def _resolve_third_party_bind_api_key(request_key: Optional[str]) -> Optional[st
     return token or None
 
 
+def _allow_unsafe_third_party_bind_urls() -> bool:
+    value = str(os.getenv(ALLOW_UNSAFE_THIRD_PARTY_BIND_URLS_ENV) or "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
+def _is_private_or_loopback_host(hostname: str) -> bool:
+    host = str(hostname or "").strip().lower()
+    if not host:
+        return True
+    if host in ("localhost",):
+        return True
+    try:
+        addr = ip_address(host)
+    except ValueError:
+        return False
+    return any(
+        (
+            addr.is_private,
+            addr.is_loopback,
+            addr.is_link_local,
+            addr.is_multicast,
+            addr.is_reserved,
+            addr.is_unspecified,
+        )
+    )
+
+
+def _build_normalized_netloc(hostname: str, port: Optional[int]) -> str:
+    host = str(hostname or "").strip().lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if port:
+        return f"{host}:{port}"
+    return host
+
+
 def _normalize_third_party_bind_api_url(raw_url: Optional[str]) -> Optional[str]:
     text = str(raw_url or "").strip()
     if not text:
@@ -1418,11 +1456,33 @@ def _normalize_third_party_bind_api_url(raw_url: Optional[str]) -> Optional[str]
         return None
     if not parsed.scheme or not parsed.netloc:
         return None
+    scheme = str(parsed.scheme or "").strip().lower()
+    hostname = str(parsed.hostname or "").strip().lower()
+    if scheme not in ("https", "http"):
+        return None
+    if parsed.username or parsed.password:
+        return None
+    if not hostname:
+        return None
+
+    allow_unsafe = _allow_unsafe_third_party_bind_urls()
+    if scheme != "https" and not allow_unsafe:
+        return None
+    if _is_private_or_loopback_host(hostname) and not allow_unsafe:
+        return None
+
     path = parsed.path or ""
     if not path or path == "/":
         path = THIRD_PARTY_BIND_PATH_DEFAULT
     path = "/" + path.lstrip("/")
-    normalized = parsed._replace(path=path, params="", fragment="")
+    normalized = parsed._replace(
+        scheme=scheme,
+        netloc=_build_normalized_netloc(hostname, parsed.port),
+        path=path,
+        params="",
+        query="",
+        fragment="",
+    )
     return urlunparse(normalized)
 
 
