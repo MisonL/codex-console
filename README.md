@@ -331,11 +331,10 @@ uv run --extra dev python -m pytest -q \
 
 ## Docker 部署
 
-### 使用 docker-compose
+### 使用正式部署脚本
 
 ```bash
-WEBUI_ACCESS_PASSWORD=your_secure_password \
-docker compose --project-directory "$(pwd -P)" -f docker-compose.yml up -d --build
+WEBUI_ACCESS_PASSWORD=your_secure_password bash scripts/docker/deploy-production.sh
 ```
 
 当前仓库内的正式部署口径就是根目录 `docker-compose.yml`：
@@ -350,15 +349,27 @@ docker compose --project-directory "$(pwd -P)" -f docker-compose.yml up -d --bui
 
 说明：
 
-- `WEBUI_ACCESS_PASSWORD` 是必填环境变量；未显式提供时，`docker compose` 会直接报错退出。
+- 首次部署必须显式提供 `WEBUI_ACCESS_PASSWORD`。
+- 后续重建若未显式提供密码，部署脚本会从现有 `codex-console-production` 容器复用原密码，不会输出密码内容。
+- 部署脚本会优先用 Python `Path.resolve()` 解析真实项目路径，并在 Windows Git Bash / MSYS 环境下自动把路径转换成 Compose 更稳的格式。
+- 这条脚本是当前推荐入口，目标平台是 Linux、macOS 和 Windows Git Bash；它会通过 `docker compose --project-directory` 固定挂载根目录，避免 macOS Docker Desktop 把 `/Volumes/...` 错解析成 `/volumes/...` 后拒绝共享目录。
 - 当前 `docker-compose.yml` 已固定暴露 `16670:1455` 和 `6080:6080`。
-- 如果只是重建正式服务，直接重复执行上面的 `docker compose up -d --build` 即可。
+- 如果只是重建正式服务，直接重复执行上面的部署脚本即可。
+
+如需手工执行 Compose，请使用完整命令，不要裸跑 `docker compose up`。下面这条更适合 Linux / macOS：
+
+```bash
+WEBUI_ACCESS_PASSWORD=your_secure_password \
+docker compose --project-directory "$(pwd -P)" -f docker-compose.yml up -d --build
+```
+
+Windows Git Bash 场景优先使用 `bash scripts/docker/deploy-production.sh`，不要手抄挂载路径。
 
 ### 使用 docker run
 
 ```bash
 docker run -d \
-  -p 1455:1455 \
+  -p 16670:1455 \
   -p 6080:6080 \
   -e DISPLAY=:99 \
   -e ENABLE_VNC=1 \
@@ -367,9 +378,10 @@ docker run -d \
   -e WEBUI_HOST=0.0.0.0 \
   -e WEBUI_PORT=1455 \
   -e WEBUI_ACCESS_PASSWORD=your_secure_password \
-  -v $(pwd)/data:/app/data \
-  --name codex-console \
-  ghcr.io/<yourname>/codex-console:latest
+  -v "$(pwd -P)/data:/app/data" \
+  -v "$(pwd -P)/logs:/app/logs" \
+  --name codex-console-production \
+  codex-console-webui:latest
 ```
 
 说明：
