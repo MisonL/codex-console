@@ -317,18 +317,42 @@ node --check static/js/accounts.js
 uv run python -m pytest -q tests/test_codex_auth_workbench.py tests/test_security_and_task_routes.py
 ```
 
+如果本次修改涉及 `AnyAuto` / `Sentinel` / 注册链路，建议至少补跑：
+
+```bash
+uv run --extra dev python -m pytest -q \
+  tests/test_anyauto_auth_flow.py \
+  tests/test_registration_password_hardening.py \
+  tests/test_openai_sentinel.py \
+  tests/test_openai_sentinel_headers.py \
+  tests/test_browser_bind_cdp.py \
+  tests/test_registration_engine.py
+```
+
 ## Docker 部署
 
 ### 使用 docker-compose
 
 ```bash
-docker-compose up -d
+WEBUI_ACCESS_PASSWORD=your_secure_password \
+docker compose --project-directory "$(pwd -P)" -f docker-compose.yml up -d --build
 ```
 
-你可以在 `docker-compose.yml` 中修改环境变量，比如端口和访问密码。  
-如果需要看“全自动绑卡”的可视化浏览器，打开：
+当前仓库内的正式部署口径就是根目录 `docker-compose.yml`：
 
-- noVNC: `http://127.0.0.1:6080`
+- 容器名：`codex-console-production`
+- Web UI：`http://127.0.0.1:16670`
+- noVNC：`http://127.0.0.1:6080/vnc.html`
+- 容器内服务端口：`1455`
+- 持久化挂载：
+  - `./data:/app/data`
+  - `./logs:/app/logs`
+
+说明：
+
+- `WEBUI_ACCESS_PASSWORD` 是必填环境变量；未显式提供时，`docker compose` 会直接报错退出。
+- 当前 `docker-compose.yml` 已固定暴露 `16670:1455` 和 `6080:6080`。
+- 如果只是重建正式服务，直接重复执行上面的 `docker compose up -d --build` 即可。
 
 ### 使用 docker run
 
@@ -352,7 +376,7 @@ docker run -d \
 
 - `WEBUI_HOST`: 监听主机，默认 `0.0.0.0`
 - `WEBUI_PORT`: 监听端口，默认 `1455`
-- `WEBUI_ACCESS_PASSWORD`: Web UI 访问密码
+- `WEBUI_ACCESS_PASSWORD`: Web UI 访问密码，必填
 - `DEBUG`: 设为 `1` 或 `true` 可开启调试模式
 - `LOG_LEVEL`: 日志级别，例如 `info`、`debug`
 

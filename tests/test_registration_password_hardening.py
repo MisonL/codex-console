@@ -256,6 +256,225 @@ def test_anyauto_register_user_sends_device_and_sentinel_headers(monkeypatch):
     assert kwargs["headers"]["x-trace-id"] == "trace-1"
 
 
+def test_anyauto_register_user_prefers_browser_sentinel_before_pow(monkeypatch):
+    calls = []
+    pow_flows = []
+
+    class DummySession:
+        def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+
+            class Response:
+                url = "https://auth.openai.com/api/accounts/user/register"
+                status_code = 200
+                headers = {}
+                text = "{}"
+
+                @staticmethod
+                def json():
+                    return {}
+
+            return Response()
+
+    client = ChatGPTClient.__new__(ChatGPTClient)
+    client.AUTH = "https://auth.openai.com"
+    client.session = DummySession()
+    client.proxy = None
+    client.device_id = "did-456"
+    client.ua = "ua"
+    client.sec_ch_ua = '"Chromium";v="145"'
+    client.impersonate = "chrome"
+    client.browser_mode = "protocol"
+    client.last_registration_state = FlowState()
+    client._log = lambda *_args, **_kwargs: None
+    client._browser_pause = lambda *_args, **_kwargs: None
+    client._headers = lambda url, **kwargs: {"accept": kwargs["accept"], **(kwargs.get("extra_headers") or {})}
+
+    def fake_browser(**kwargs):
+        return BrowserSentinelArtifacts(
+            token='{"id":"did-456","flow":"username_password_create","c":"browser"}',
+            passkey_capabilities='{"conditionalGet":true}',
+        )
+
+    def fake_pow(*args, **kwargs):
+        flow = kwargs.get("flow")
+        pow_flows.append(flow)
+        if flow == "authorize_continue":
+            return "authorize-continue-token"
+        return "pow-should-not-run"
+
+    monkeypatch.setattr(client, "_fetch_browser_sentinel_artifacts", fake_browser)
+    monkeypatch.setattr(chatgpt_client_module, "build_sentinel_token", fake_pow)
+    monkeypatch.setattr(chatgpt_client_module, "generate_datadog_trace", lambda: {"x-trace-id": "trace-1"})
+
+    success, message = ChatGPTClient.register_user(client, "tester@example.com", "Aa1!fixedPwd")
+
+    assert success is True
+    assert message == "注册成功"
+    assert pow_flows == []
+    assert calls[0][1]["headers"]["openai-sentinel-token"] == '{"id":"did-456","flow":"username_password_create","c":"browser"}'
+
+
+def test_anyauto_create_account_falls_back_to_pow_when_browser_sentinel_missing(monkeypatch):
+    calls = []
+    sequence = []
+
+    class DummySession:
+        def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+
+            class Response:
+                url = "https://auth.openai.com/api/accounts/create_account"
+                status_code = 200
+                headers = {}
+                text = "{}"
+
+                @staticmethod
+                def json():
+                    return {}
+
+            return Response()
+
+    client = ChatGPTClient.__new__(ChatGPTClient)
+    client.AUTH = "https://auth.openai.com"
+    client.BASE = "https://chatgpt.com"
+    client.session = DummySession()
+    client.proxy = None
+    client.device_id = "did-456"
+    client.refresh_token = ""
+    client.ua = "ua"
+    client.sec_ch_ua = '"Chromium";v="145"'
+    client.impersonate = "chrome"
+    client.browser_mode = "protocol"
+    client._log = lambda *_args, **_kwargs: None
+    client._browser_pause = lambda *_args, **_kwargs: None
+    client._headers = lambda url, **kwargs: {"accept": kwargs["accept"], **(kwargs.get("extra_headers") or {})}
+    client._sniff_refresh_token = lambda *_args, **_kwargs: None
+    client._sync_response_cookies = lambda *_args, **_kwargs: None
+    client._state_from_payload = lambda *_args, **_kwargs: FlowState(page_type="chatgpt_home")
+
+    def fake_browser(**kwargs):
+        sequence.append(("browser", kwargs["flow"]))
+        return None
+
+    def fake_pow(*args, **kwargs):
+        sequence.append(("pow", kwargs.get("flow")))
+        return "pow-token"
+
+    monkeypatch.setattr(client, "_fetch_browser_sentinel_artifacts", fake_browser)
+    monkeypatch.setattr(chatgpt_client_module, "build_sentinel_token", fake_pow)
+    monkeypatch.setattr(chatgpt_client_module, "generate_datadog_trace", lambda: {"x-trace-id": "trace-1"})
+
+    success, message = ChatGPTClient.create_account(
+        client,
+        "Olivia",
+        "Johnson",
+        "2005-08-01",
+    )
+
+    assert success is True
+    assert message == "账号创建成功"
+    assert sequence == [("browser", "oauth_create_account"), ("pow", "oauth_create_account")]
+    assert calls[0][1]["headers"]["OpenAI-Sentinel-Token"] == "pow-token"
+
+
+def test_anyauto_register_user_preserves_empty_json_sentinel_when_all_strategies_fail(monkeypatch):
+    calls = []
+
+    class DummySession:
+        def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+
+            class Response:
+                url = "https://auth.openai.com/api/accounts/user/register"
+                status_code = 200
+                headers = {}
+                text = "{}"
+
+                @staticmethod
+                def json():
+                    return {}
+
+            return Response()
+
+    client = ChatGPTClient.__new__(ChatGPTClient)
+    client.AUTH = "https://auth.openai.com"
+    client.session = DummySession()
+    client.proxy = None
+    client.device_id = "did-456"
+    client.ua = "ua"
+    client.sec_ch_ua = '"Chromium";v="145"'
+    client.impersonate = "chrome"
+    client.browser_mode = "protocol"
+    client.last_registration_state = FlowState()
+    client._log = lambda *_args, **_kwargs: None
+    client._browser_pause = lambda *_args, **_kwargs: None
+    client._headers = lambda url, **kwargs: {"accept": kwargs["accept"], **(kwargs.get("extra_headers") or {})}
+
+    monkeypatch.setattr(client, "_fetch_browser_sentinel_artifacts", lambda **kwargs: None)
+    monkeypatch.setattr(chatgpt_client_module, "build_sentinel_token", lambda *args, **kwargs: "")
+    monkeypatch.setattr(chatgpt_client_module, "generate_datadog_trace", lambda: {"x-trace-id": "trace-1"})
+
+    success, message = ChatGPTClient.register_user(client, "tester@example.com", "Aa1!fixedPwd")
+
+    assert success is True
+    assert message == "注册成功"
+    assert calls[0][1]["headers"]["openai-sentinel-token"] == "{}"
+
+
+def test_anyauto_create_account_preserves_empty_json_sentinel_when_all_strategies_fail(monkeypatch):
+    calls = []
+
+    class DummySession:
+        def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+
+            class Response:
+                url = "https://auth.openai.com/api/accounts/create_account"
+                status_code = 200
+                headers = {}
+                text = "{}"
+
+                @staticmethod
+                def json():
+                    return {}
+
+            return Response()
+
+    client = ChatGPTClient.__new__(ChatGPTClient)
+    client.AUTH = "https://auth.openai.com"
+    client.BASE = "https://chatgpt.com"
+    client.session = DummySession()
+    client.proxy = None
+    client.device_id = "did-456"
+    client.refresh_token = ""
+    client.ua = "ua"
+    client.sec_ch_ua = '"Chromium";v="145"'
+    client.impersonate = "chrome"
+    client.browser_mode = "protocol"
+    client._log = lambda *_args, **_kwargs: None
+    client._browser_pause = lambda *_args, **_kwargs: None
+    client._headers = lambda url, **kwargs: {"accept": kwargs["accept"], **(kwargs.get("extra_headers") or {})}
+    client._sniff_refresh_token = lambda *_args, **_kwargs: None
+    client._sync_response_cookies = lambda *_args, **_kwargs: None
+    client._state_from_payload = lambda *_args, **_kwargs: FlowState(page_type="chatgpt_home")
+
+    monkeypatch.setattr(client, "_fetch_browser_sentinel_artifacts", lambda **kwargs: None)
+    monkeypatch.setattr(chatgpt_client_module, "build_sentinel_token", lambda *args, **kwargs: "")
+    monkeypatch.setattr(chatgpt_client_module, "generate_datadog_trace", lambda: {"x-trace-id": "trace-1"})
+
+    success, message = ChatGPTClient.create_account(
+        client,
+        "Olivia",
+        "Johnson",
+        "2005-08-01",
+    )
+
+    assert success is True
+    assert message == "账号创建成功"
+    assert calls[0][1]["headers"]["OpenAI-Sentinel-Token"] == "{}"
+
+
 def test_anyauto_register_user_upgrades_generic_400_to_environment_rejection(monkeypatch):
     class DummySession:
         def post(self, url, **kwargs):

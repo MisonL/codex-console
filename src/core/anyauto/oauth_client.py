@@ -363,6 +363,52 @@ class OAuthClient:
             headless=self._browser_sentinel_headless(),
         )
 
+    def _build_write_sentinel_artifacts(
+        self,
+        *,
+        flow: str,
+        page_url: str,
+        device_id: str,
+        user_agent: Optional[str],
+        sec_ch_ua: Optional[str] = None,
+        impersonate: Optional[str] = None,
+        include_session_observer: bool = False,
+    ):
+        self._log("正在启动浏览器获取 Sentinel Token (优先方案)...")
+        try:
+            sentinel = self._fetch_browser_sentinel_artifacts(
+                flow=flow,
+                page_url=page_url,
+                device_id=device_id,
+                user_agent=user_agent,
+                include_session_observer=include_session_observer,
+            )
+            sentinel_token = sentinel.token if sentinel and sentinel.token else None
+            self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel_token)}")
+            if sentinel_token:
+                return sentinel_token, sentinel
+        except Exception as e:
+            self._log(f"浏览器 Sentinel 获取异常: {e}", "warning")
+
+        sentinel_token = None
+        try:
+            self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow={flow}")
+            sentinel_token = build_sentinel_token(
+                self.session,
+                device_id,
+                flow=flow,
+                user_agent=user_agent,
+                sec_ch_ua=sec_ch_ua,
+                impersonate=impersonate,
+            )
+            if sentinel_token:
+                self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            else:
+                self._log("纯 Python PoW 算法返回了空 Token，准备继续失败暴露", "warning")
+        except Exception as e:
+            self._log(f"纯 Python PoW 算法异常: {e}", "warning")
+        return sentinel_token, None
+
     @staticmethod
     def _iter_text_fragments(value):
         if isinstance(value, str):
@@ -959,36 +1005,16 @@ class OAuthClient:
         about_you_url = f"{self.oauth_issuer}/about-you"
         request_url = f"{self.oauth_api_base}/api/accounts/create_account"
 
-        sentinel_token = None
-        try:
-            self._log("步骤5: 命中 about_you，提交姓名和生日完成注册")
-            self._log("尝试使用纯 Python PoW (Node VM) 获取 Token, flow=oauth_create_account")
-            sentinel_token = build_sentinel_token(
-                self.session,
-                device_id,
-                flow="oauth_create_account",
-                user_agent=user_agent,
-                sec_ch_ua=sec_ch_ua,
-                impersonate=impersonate,
-            )
-            if sentinel_token:
-                self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
-            else:
-                self._log("纯 Python PoW 算法返回了空 Token，准备降级到浏览器", "warning")
-        except Exception as e:
-            self._log(f"纯 Python PoW 算法异常: {e}", "warning")
-
-        if not sentinel_token:
-            self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")
-            sentinel = self._fetch_browser_sentinel_artifacts(
-                flow="oauth_create_account",
-                page_url=referer or about_you_url,
-                device_id=device_id,
-                user_agent=user_agent,
-                include_session_observer=True,
-            )
-            sentinel_token = sentinel.token if sentinel else None
-            self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel_token)}")
+        self._log("步骤5: 命中 about_you，提交姓名和生日完成注册")
+        sentinel_token, _sentinel = self._build_write_sentinel_artifacts(
+            flow="oauth_create_account",
+            page_url=referer or about_you_url,
+            device_id=device_id,
+            user_agent=user_agent,
+            sec_ch_ua=sec_ch_ua,
+            impersonate=impersonate,
+            include_session_observer=True,
+        )
 
         if not sentinel_token:
             self._set_error("无法获取 sentinel token (oauth_create_account)")

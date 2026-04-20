@@ -585,6 +585,48 @@ class ChatGPTClient:
             headless=self._browser_sentinel_headless(),
         )
 
+    def _build_write_sentinel_artifacts(
+        self,
+        *,
+        flow: str,
+        page_url: str,
+        include_session_observer: bool = False,
+        include_passkey_capabilities: bool = False,
+    ):
+        self._log("正在启动浏览器获取 Sentinel Token (优先方案)...")
+        try:
+            sentinel = self._fetch_browser_sentinel_artifacts(
+                flow=flow,
+                page_url=page_url,
+                include_session_observer=include_session_observer,
+                include_passkey_capabilities=include_passkey_capabilities,
+            )
+            sentinel_token = sentinel.token if sentinel and sentinel.token else None
+            self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel_token)}")
+            if sentinel_token:
+                return sentinel_token, sentinel
+        except Exception as e:
+            self._log(f"浏览器 Sentinel 获取异常: {e}")
+
+        sentinel_token = None
+        try:
+            self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow={flow}")
+            sentinel_token = build_sentinel_token(
+                self.session,
+                self.device_id,
+                flow=flow,
+                user_agent=self.ua,
+                sec_ch_ua=self.sec_ch_ua,
+                impersonate=self.impersonate,
+            )
+            if sentinel_token:
+                self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
+            else:
+                self._log("纯 Python PoW 算法返回了空 Token，检查 Node 环境或 SDK 版本")
+        except Exception as e:
+            self._log(f"纯 Python PoW 算法执行崩溃: {e}")
+        return sentinel_token or "{}", None
+
     def _state_from_url(self, url, method="GET"):
         state = extract_flow_state(
             current_url=normalize_flow_url(url, auth_base=self.AUTH),
@@ -1429,49 +1471,11 @@ class ChatGPTClient:
         """
         self._log(f"注册用户: {email}")
         url = f"{self.AUTH}/api/accounts/user/register"
-        sentinel_token = build_sentinel_token(
-            self.session,
-            self.device_id,
-            flow="authorize_continue",
-            user_agent=self.ua,
-            sec_ch_ua=self.sec_ch_ua,
-            impersonate=self.impersonate,
+        sentinel_header, _sentinel = self._build_write_sentinel_artifacts(
+            flow="username_password_create",
+            page_url=f"{self.AUTH}/create-account/password",
+            include_passkey_capabilities=True,
         )
-        if sentinel_token:
-            self._log("register_user: 已生成 sentinel token")
-        else:
-            self._log("register_user: 未生成 sentinel token，降级继续请求")
-        
-        sentinel_header = None
-        sentinel = None
-        try:
-            user_agent = self.ua
-            self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow=username_password_create")
-            sentinel_header = build_sentinel_token(
-                self.session, 
-                self.device_id, 
-                flow="username_password_create", 
-                user_agent=user_agent,
-                sec_ch_ua=self.sec_ch_ua,
-                impersonate=self.impersonate
-            )
-            
-            if sentinel_header:
-                self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
-            else:
-                self._log("纯 Python PoW 算法返回了空 Token，检查 Node 环境或 SDK 版本")
-        except Exception as e:
-            self._log(f"纯 Python PoW 算法执行崩溃: {e}")
-            
-        if not sentinel_header:
-            self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")
-            sentinel = self._fetch_browser_sentinel_artifacts(
-                flow="username_password_create",
-                page_url=f"{self.AUTH}/create-account/password",
-                include_passkey_capabilities=True,
-            )
-            sentinel_header = sentinel.token if sentinel else "{}"
-            self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel)}")
 
         # 尝试获取当前的完整 URL 以补全 Referer
         current_referer = f"{self.AUTH}/create-account/password"
@@ -1675,35 +1679,11 @@ class ChatGPTClient:
         self._log(f"完成账号创建: {name}")
         url = f"{self.AUTH}/api/accounts/create_account"
         
-        sentinel_header = None
-        sentinel = None
-        try:
-            user_agent = self.ua
-            self._log(f"尝试使用纯 Python PoW (Node VM) 获取 Token, flow=oauth_create_account")
-            sentinel_header = build_sentinel_token(
-                self.session, 
-                self.device_id, 
-                flow="oauth_create_account", 
-                user_agent=user_agent,
-                sec_ch_ua=self.sec_ch_ua,
-                impersonate=self.impersonate
-            )
-            if sentinel_header:
-                self._log("使用纯 Python PoW 算法获取 Sentinel Token 成功")
-            else:
-                self._log("纯 Python PoW 算法返回了空 Token，准备降级到浏览器")
-        except Exception as e:
-            self._log(f"纯 Python PoW 算法异常: {e}")
-            
-        if not sentinel_header:
-            self._log("正在启动浏览器获取 Sentinel Token (降级方案)...")
-            sentinel = self._fetch_browser_sentinel_artifacts(
-                flow="oauth_create_account",
-                page_url=f"{self.AUTH}/about-you",
-                include_session_observer=True,
-            )
-            sentinel_header = sentinel.token if sentinel else "{}"
-            self._log(f"浏览器获取 Sentinel Token 结束, success={bool(sentinel)}")
+        sentinel_header, sentinel = self._build_write_sentinel_artifacts(
+            flow="oauth_create_account",
+            page_url=f"{self.AUTH}/about-you",
+            include_session_observer=True,
+        )
 
         headers = self._headers(
             url,

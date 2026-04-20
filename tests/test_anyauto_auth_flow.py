@@ -5,6 +5,7 @@ from src.core.anyauto.chatgpt_client import ChatGPTClient
 from src.core.anyauto.oauth_client import OAuthClient
 from src.core.anyauto.register_flow import AnyAutoRegistrationEngine
 from src.core.anyauto.utils import FlowState
+from src.core.openai.sentinel_browser import BrowserSentinelArtifacts
 
 
 class DummyCookie:
@@ -392,6 +393,66 @@ def test_login_and_get_tokens_handles_about_you_before_token_exchange(monkeypatc
 
     assert result["refresh_token"] == "oaistb_rt_test_2"
     assert about_you_calls == [("Olivia", "Johnson", "2005-08-01", "did-1")]
+
+
+def test_oauth_about_you_prefers_browser_sentinel_before_pow(monkeypatch):
+    client = OAuthClient(
+        config={
+            "oauth_issuer": "https://auth.openai.com",
+            "oauth_client_id": "app_test",
+            "oauth_redirect_uri": "http://localhost:1455/auth/callback",
+        },
+        verbose=False,
+    )
+    client._log = lambda *args, **kwargs: None
+    client._browser_pause = lambda *args, **kwargs: None
+    client._headers = lambda url, **kwargs: {"accept": kwargs["accept"], **(kwargs.get("extra_headers") or {})}
+    client._sync_response_cookies = lambda *_args, **_kwargs: None
+    client._response_hits_account_deactivated = lambda *_args, **_kwargs: False
+    client._state_hits_account_deactivated = lambda *_args, **_kwargs: False
+    client._state_from_payload = lambda *_args, **_kwargs: FlowState(
+        page_type="oauth_callback",
+        current_url="http://localhost:1455/auth/callback?code=code-1&state=state-1",
+    )
+
+    session = DummySession(
+        DummyResponse(
+            "https://auth.openai.com/api/accounts/create_account",
+            payload={},
+        )
+    )
+    client.session = session
+
+    pow_flows = []
+
+    def fake_browser(**kwargs):
+        return BrowserSentinelArtifacts(
+            token='{"id":"did-1","flow":"oauth_create_account","c":"browser"}',
+            session_observer_token="so-token-1",
+        )
+
+    def fake_pow(*args, **kwargs):
+        pow_flows.append(kwargs.get("flow"))
+        return "pow-should-not-run"
+
+    monkeypatch.setattr(client, "_fetch_browser_sentinel_artifacts", fake_browser)
+    monkeypatch.setattr(oauth_client_module, "build_sentinel_token", fake_pow)
+    monkeypatch.setattr(oauth_client_module, "generate_datadog_trace", lambda: {"x-trace-id": "trace-1"})
+
+    next_state = client._submit_about_you_create_account(
+        "Olivia",
+        "Johnson",
+        "2005-08-01",
+        "did-1",
+        user_agent="Mozilla/5.0",
+        sec_ch_ua='"Chromium";v="136"',
+        impersonate="chrome136",
+    )
+
+    assert next_state.page_type == "oauth_callback"
+    assert pow_flows == []
+    assert len(session.posts) == 1
+    assert session.posts[0][1]["headers"]["openai-sentinel-token"] == '{"id":"did-1","flow":"oauth_create_account","c":"browser"}'
 
 
 def test_anyauto_run_prefers_oauth_continuation_before_session_salvage(monkeypatch):
