@@ -844,13 +844,13 @@
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/card-pool" class="nav-link">卡池</a>
-                <a href="/auto-team" class="nav-link active">team</a>
+                <a href="/auto-team" class="nav-link active">Team 管理</a>
                 <a href="/logs" class="nav-link">后台日志</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">系统自检</a>
             <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
         </div>
         </nav>
@@ -880,7 +880,7 @@
                             <div class="form-group">
                                 <label for="targetEmail">目标邮箱</label>
                                 <div class="target-email-row">
-                                    <textarea id="targetEmail" class="target-email-input" placeholder="请输入要邀请进 Team 的邮箱；支持多行/逗号分隔"></textarea>
+                                    <textarea id="targetEmail" class="target-email-input" placeholder="请输入要邀请进 Team 的邮箱；支持多行/逗号分隔" autocomplete="email"></textarea>
                                     <button id="btnPickTargetEmail" class="btn btn-target-plus" title="从账号管理选择子号">+</button>
                                 </div>
                             </div>
@@ -950,7 +950,7 @@
                     <div class="team-console-header">
                         <h3 class="team-console-title">Team 列表</h3>
                         <div class="team-toolbar">
-                            <select id="teamStatusFilter" class="form-select">
+                            <select id="teamStatusFilter" class="form-select" aria-label="Team 状态筛选">
                                 <option value="">状态筛选</option>
                                 <option value="active">可用</option>
                                 <option value="full">已满</option>
@@ -959,7 +959,7 @@
                                 <option value="banned">已封禁</option>
                                 <option value="failed">失败</option>
                             </select>
-                            <input id="teamSearchInput" type="text" class="form-input" placeholder="搜索邮箱/Team 名称...">
+                            <input id="teamSearchInput" type="text" class="form-input" placeholder="搜索邮箱/Team 名称..." aria-label="搜索 Team 邮箱或名称" autocomplete="search">
                             <div class="team-column-menu-wrap">
                                 <button id="btnToggleColumnMenu" class="btn btn-secondary" type="button">列设置</button>
                                 <div id="teamColumnMenu" class="team-column-menu">
@@ -977,7 +977,7 @@
                         <table class="team-table">
                             <thead>
                                 <tr>
-                                    <th style="width:38px;"><input id="teamSelectAll" type="checkbox"></th>
+                                    <th style="width:38px;"><input id="teamSelectAll" type="checkbox" aria-label="全选 Team"></th>
                                     <th style="width:70px;">ID</th>
                                     <th>邮箱</th>
                                     <th>TEAM 名称</th>
@@ -1007,7 +1007,7 @@
                 <button id="btnCloseTargetModal" class="target-modal-close" type="button" aria-label="关闭">×</button>
             </div>
             <div class="target-modal-toolbar">
-                <input id="targetModalSearch" class="target-modal-search form-input" type="text" placeholder="搜索邮箱...">
+                <input id="targetModalSearch" class="target-modal-search form-input" type="text" placeholder="搜索邮箱..." aria-label="搜索目标邮箱" autocomplete="search">
                 <button id="btnTargetSelectAll" class="btn btn-secondary btn-sm" type="button">全选</button>
                 <button id="btnTargetClearAll" class="btn btn-secondary btn-sm" type="button">清空</button>
             </div>
@@ -1028,7 +1028,7 @@
                 <button id="btnCloseManualInviterModal" class="target-modal-close" type="button" aria-label="关闭">×</button>
             </div>
             <div class="target-modal-toolbar">
-                <input id="manualInviterSearch" class="target-modal-search form-input" type="text" placeholder="搜索邮箱/ID...">
+                <input id="manualInviterSearch" class="target-modal-search form-input" type="text" placeholder="搜索邮箱/ID..." aria-label="搜索邀请账号" autocomplete="search">
                 <button id="btnManualInviterSelectAll" class="btn btn-secondary btn-sm" type="button">全选</button>
                 <button id="btnManualInviterClearAll" class="btn btn-secondary btn-sm" type="button">清空</button>
             </div>
@@ -1056,7 +1056,7 @@
                     <div class="form-group" style="margin-bottom:0;">
                         <label for="teamMemberInviteEmail">新增成员邮箱</label>
                         <div class="member-input-row">
-                            <input id="teamMemberInviteEmail" type="email" class="form-input" placeholder="user@example.com">
+                            <input id="teamMemberInviteEmail" type="email" class="form-input" placeholder="user@example.com" autocomplete="email">
                             <button id="btnInviteMember" class="btn btn-purple" type="button">添加</button>
                         </div>
                     </div>
@@ -1122,32 +1122,32 @@
                 <div id="teamImportSinglePanel" class="team-import-panel active">
                     <div class="form-group">
                         <label for="teamImportAccessToken">Access Token (AT) *</label>
-                        <input id="teamImportAccessToken" class="form-input" type="text" placeholder="eyJ...">
+                        <input id="teamImportAccessToken" class="form-input" type="text" placeholder="eyJ..." autocomplete="off">
                         <div class="team-import-hint">必填项，以 eyJ 开头的 JWT Token</div>
                     </div>
                     <div class="form-group">
                         <label for="teamImportRefreshToken">Refresh Token (RT)</label>
-                        <input id="teamImportRefreshToken" class="form-input" type="text" placeholder="oaistb_rt...">
+                        <input id="teamImportRefreshToken" class="form-input" type="text" placeholder="oaistb_rt..." autocomplete="off">
                         <div class="team-import-hint">可选，用于自动刷新 AT</div>
                     </div>
                     <div class="form-group">
                         <label for="teamImportSessionToken">Session Token</label>
-                        <input id="teamImportSessionToken" class="form-input" type="text" placeholder="eyJ...">
+                        <input id="teamImportSessionToken" class="form-input" type="text" placeholder="eyJ..." autocomplete="off">
                         <div class="team-import-hint">可选，作为备选刷新方式</div>
                     </div>
                     <div class="form-group">
                         <label for="teamImportClientId">Client ID</label>
-                        <input id="teamImportClientId" class="form-input" type="text" placeholder="app_xxx">
+                        <input id="teamImportClientId" class="form-input" type="text" placeholder="app_xxx" autocomplete="off">
                         <div class="team-import-hint">使用 Refresh Token 时建议填写</div>
                     </div>
                     <div class="form-group">
                         <label for="teamImportEmail">邮箱</label>
-                        <input id="teamImportEmail" class="form-input" type="email" placeholder="admin@example.com">
+                        <input id="teamImportEmail" class="form-input" type="email" placeholder="admin@example.com" autocomplete="email">
                         <div class="team-import-hint">可选，不填将尝试从 AT 中自动提取</div>
                     </div>
                     <div class="form-group" style="margin-bottom:0;">
                         <label for="teamImportAccountId">Account ID</label>
-                        <input id="teamImportAccountId" class="form-input" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                        <input id="teamImportAccountId" class="form-input" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off">
                         <div class="team-import-hint">可选，不填将尝试从 AT 中自动提取</div>
                     </div>
                 </div>
@@ -1157,7 +1157,7 @@
                         <label for="teamImportBatchText">批量导入文本</label>
                         <textarea id="teamImportBatchText" class="form-input team-import-batch-input" placeholder='支持两种格式：
 1) JSON 数组：[{"email":"a@xx.com","access_token":"eyJ..."}, ...]
-2) JSONL：每行一个 JSON 对象'></textarea>
+2) JSONL：每行一个 JSON 对象' autocomplete="off"></textarea>
                         <div class="team-import-hint">每条至少要有 email + access_token；可附带 refresh_token/session_token/client_id/account_id。</div>
                     </div>
                 </div>
@@ -1175,4 +1175,3 @@
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-

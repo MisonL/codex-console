@@ -588,7 +588,7 @@
                 <div class="cards-toolbar">
                     <div class="cards-toolbar-left">
                         <div class="cards-search-wrap">
-                            <input id="card-search-input" class="cards-search" type="text" placeholder="搜索账号...">
+                            <input id="card-search-input" class="cards-search" type="text" placeholder="搜索账号..." aria-label="搜索账号" autocomplete="search">
                         </div>
 
                         <div class="view-toggle">
@@ -658,17 +658,17 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label for="overview-add-email">邮箱 *</label>
-                            <input id="overview-add-email" type="text" placeholder="name@example.com">
+                            <input id="overview-add-email" type="text" placeholder="name@example.com" autocomplete="email">
                         </div>
                         <div class="form-group">
                             <label for="overview-add-password">密码 *</label>
-                            <input id="overview-add-password" type="text" placeholder="必填">
+                            <input id="overview-add-password" type="text" placeholder="必填" autocomplete="current-password">
                         </div>
                     </div>
                     <div class="form-row">
                         <div class="form-group">
                             <label for="overview-add-email-service">邮箱服务</label>
-                            <input id="overview-add-email-service" type="text" value="manual">
+                            <input id="overview-add-email-service" type="text" value="manual" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="overview-add-subscription">订阅</label>
@@ -683,17 +683,17 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label for="overview-add-client-id">Client ID</label>
-                            <input id="overview-add-client-id" type="text">
+                            <input id="overview-add-client-id" type="text" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="overview-add-account-id">Account ID</label>
-                            <input id="overview-add-account-id" type="text">
+                            <input id="overview-add-account-id" type="text" autocomplete="off">
                         </div>
                     </div>
                     <div class="form-row">
                         <div class="form-group">
                             <label for="overview-add-workspace-id">Workspace ID</label>
-                            <input id="overview-add-workspace-id" type="text">
+                            <input id="overview-add-workspace-id" type="text" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="overview-add-status">状态</label>
@@ -739,7 +739,7 @@
                 <div class="modal-body">
                     <div class="form-group">
                         <label for="overview-import-json">粘贴 JSON（支持账号详情字段）</label>
-                        <textarea id="overview-import-json" style="width:100%;min-height:220px;font-family:var(--font-mono);" placeholder='[{"email":"a@example.com","password":"123456","subscription_type":"plus"}]'></textarea>
+                        <textarea id="overview-import-json" style="width:100%;min-height:220px;font-family:var(--font-mono);" placeholder='[{"email":"a@example.com","password":"123456","subscription_type":"plus"}]' autocomplete="off"></textarea>
                     </div>
                     <label style="display:flex;align-items:center;gap:8px;margin-top:8px;">
                         <input id="overview-import-overwrite" type="checkbox"> 覆盖同邮箱已有账号
@@ -761,6 +761,5 @@
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
 
 

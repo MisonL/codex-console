@@ -21,13 +21,13 @@
                 <a href="/email-services" class="nav-link active">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/card-pool" class="nav-link">卡池</a>
-                <a href="/auto-team" class="nav-link">team</a>
+                <a href="/auto-team" class="nav-link">Team 管理</a>
                 <a href="/logs" class="nav-link">后台日志</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">⚙️</a>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">系统自检</a>
             <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">🌙</button>
         </div>
         </nav>
@@ -76,7 +76,7 @@
                     </div>
                     <div class="form-group">
                         <label for="outlook-import-data">批量导入数据</label>
-                        <textarea id="outlook-import-data" rows="8" placeholder="example@outlook.com----password123&#10;test@outlook.com----password456----client_id----oaistb_rt..."></textarea>
+                        <textarea id="outlook-import-data" rows="8" placeholder="example@outlook.com----password123&#10;test@outlook.com----password456----client_id----oaistb_rt..." autocomplete="off"></textarea>
                     </div>
                     <div class="form-row">
                         <div class="form-group">
@@ -109,7 +109,7 @@
                         <table class="data-table">
                             <thead>
                                 <tr>
-                                    <th style="width: 40px;"><input type="checkbox" id="select-all-custom"></th>
+                                    <th style="width: 40px;"><input type="checkbox" id="select-all-custom" aria-label="全选自定义邮箱服务"></th>
                                     <th>名称</th>
                                     <th style="width: 90px;">类型</th>
                                     <th style="width: 400px;">地址</th>
@@ -146,7 +146,7 @@
                         <table class="data-table">
                             <thead>
                                 <tr>
-                                    <th style="width: 40px;"><input type="checkbox" id="select-all-outlook"></th>
+                                    <th style="width: 40px;"><input type="checkbox" id="select-all-outlook" aria-label="全选 Outlook 账户"></th>
                                     <th>邮箱</th>
                                     <th style="width: 100px;">认证方式</th>
                                     <th style="width: 120px;">注册状态</th>
@@ -180,7 +180,7 @@
                     <form id="tempmail-form">
                         <div class="form-group">
                             <label for="tempmail-api">Tempmail.lol API 地址</label>
-                            <input type="text" id="tempmail-api" name="api_url" placeholder="https://tempmail.lol/api">
+                            <input type="text" id="tempmail-api" name="api_url" placeholder="https://tempmail.lol/api" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label>
@@ -194,16 +194,16 @@
                         <hr style="border: 0; border-top: 1px solid var(--border-color); margin: var(--spacing-lg) 0;">
                         <div class="form-group">
                             <label for="yyds-api">YYDS Mail API 地址</label>
-                            <input type="text" id="yyds-api" name="yyds_api_url" placeholder="https://maliapi.215.im/v1">
+                            <input type="text" id="yyds-api" name="yyds_api_url" placeholder="https://maliapi.215.im/v1" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="yyds-api-key">YYDS Mail API Key</label>
-                            <input type="password" id="yyds-api-key" name="yyds_api_key" placeholder="留空则保持原值不变">
+                            <input type="password" id="yyds-api-key" name="yyds_api_key" placeholder="留空则保持原值不变" autocomplete="off">
                             <small style="color: var(--text-muted);">留空则保持已保存的 API Key 不变</small>
                         </div>
                         <div class="form-group">
                             <label for="yyds-default-domain">YYDS 默认域名（可选）</label>
-                            <input type="text" id="yyds-default-domain" name="yyds_default_domain" placeholder="public.example.com">
+                            <input type="text" id="yyds-default-domain" name="yyds_default_domain" placeholder="public.example.com" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label>
@@ -232,7 +232,7 @@
                 <form id="add-custom-form">
                     <div class="form-group">
                         <label for="custom-name">服务名称</label>
-                        <input type="text" id="custom-name" name="name" required placeholder="例如：我的域名邮箱">
+                        <input type="text" id="custom-name" name="name" required placeholder="例如：我的域名邮箱" autocomplete="off">
                     </div>
                     <div class="form-group">
                         <label for="custom-sub-type">服务类型</label>
@@ -252,22 +252,22 @@
                     <div id="add-moemail-fields">
                         <div class="form-group">
                             <label for="custom-api-url">API 地址</label>
-                            <input type="text" id="custom-api-url" name="api_url" placeholder="https://api.example.com">
+                            <input type="text" id="custom-api-url" name="api_url" placeholder="https://api.example.com" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="custom-api-key">API 密钥 (可选)</label>
-                            <input type="text" id="custom-api-key" name="api_key" placeholder="API Key">
+                            <input type="text" id="custom-api-key" name="api_key" placeholder="API Key" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="custom-domain">邮箱域名</label>
-                            <input type="text" id="custom-domain" name="domain" placeholder="example.com">
+                            <input type="text" id="custom-domain" name="domain" placeholder="example.com" autocomplete="off">
                         </div>
                     </div>
                     <!-- Tempmail.lol 字段 -->
                     <div id="add-tempmail-builtin-fields" style="display:none;">
                         <div class="form-group">
                             <label for="custom-tpo-base-url">API 地址</label>
-                            <input type="text" id="custom-tpo-base-url" name="tpo_base_url" placeholder="https://api.tempmail.lol/v2">
+                            <input type="text" id="custom-tpo-base-url" name="tpo_base_url" placeholder="https://api.tempmail.lol/v2" autocomplete="url">
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -284,15 +284,15 @@
                     <div id="add-yyds-fields" style="display:none;">
                         <div class="form-group">
                             <label for="custom-yyds-base-url">API 地址</label>
-                            <input type="text" id="custom-yyds-base-url" name="yyds_base_url" placeholder="https://maliapi.215.im/v1">
+                            <input type="text" id="custom-yyds-base-url" name="yyds_base_url" placeholder="https://maliapi.215.im/v1" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="custom-yyds-api-key">API Key</label>
-                            <input type="text" id="custom-yyds-api-key" name="yyds_api_key" placeholder="YYDS Mail API Key">
+                            <input type="text" id="custom-yyds-api-key" name="yyds_api_key" placeholder="YYDS Mail API Key" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="custom-yyds-default-domain">默认域名（可选）</label>
-                            <input type="text" id="custom-yyds-default-domain" name="yyds_default_domain" placeholder="public.example.com">
+                            <input type="text" id="custom-yyds-default-domain" name="yyds_default_domain" placeholder="public.example.com" autocomplete="off">
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -309,30 +309,30 @@
                     <div id="add-tempmail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="custom-tm-base-url">Worker 地址</label>
-                            <input type="text" id="custom-tm-base-url" name="tm_base_url" placeholder="https://mail.example.com">
+                            <input type="text" id="custom-tm-base-url" name="tm_base_url" placeholder="https://mail.example.com" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="custom-tm-admin-password">Admin 密码</label>
-                            <input type="password" id="custom-tm-admin-password" name="tm_admin_password" placeholder="x-admin-auth 密码">
+                            <input type="password" id="custom-tm-admin-password" name="tm_admin_password" placeholder="x-admin-auth 密码" autocomplete="current-password">
                         </div>
                         <div class="form-group">
                             <label for="custom-tm-domain">邮箱域名</label>
-                            <input type="text" id="custom-tm-domain" name="tm_domain" placeholder="example.com">
+                            <input type="text" id="custom-tm-domain" name="tm_domain" placeholder="example.com" autocomplete="off">
                         </div>
                     </div>
                     <!-- DuckMail 字段 -->
                     <div id="add-duckmail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="custom-dm-base-url">API 地址</label>
-                            <input type="text" id="custom-dm-base-url" name="dm_base_url" placeholder="https://api.duckmail.sbs">
+                            <input type="text" id="custom-dm-base-url" name="dm_base_url" placeholder="https://api.duckmail.sbs" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="custom-dm-api-key">API Key（可选）</label>
-                            <input type="text" id="custom-dm-api-key" name="dm_api_key" placeholder="dk_xxx">
+                            <input type="text" id="custom-dm-api-key" name="dm_api_key" placeholder="dk_xxx" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="custom-dm-domain">默认域名</label>
-                            <input type="text" id="custom-dm-domain" name="dm_domain" placeholder="example.com">
+                            <input type="text" id="custom-dm-domain" name="dm_domain" placeholder="example.com" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="custom-dm-password-length">随机密码长度</label>
@@ -343,45 +343,45 @@
                     <div id="add-luckmail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="custom-lm-base-url">平台地址</label>
-                            <input type="text" id="custom-lm-base-url" name="lm_base_url" placeholder="https://mails.luckyous.com/">
+                            <input type="text" id="custom-lm-base-url" name="lm_base_url" placeholder="https://mails.luckyous.com/" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="custom-lm-api-key">API Key</label>
-                            <input type="text" id="custom-lm-api-key" name="lm_api_key" placeholder="LuckMail API Key">
+                            <input type="text" id="custom-lm-api-key" name="lm_api_key" placeholder="LuckMail API Key" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="custom-lm-project-code">项目编码</label>
-                            <input type="text" id="custom-lm-project-code" name="lm_project_code" value="openai" placeholder="openai">
+                            <input type="text" id="custom-lm-project-code" name="lm_project_code" value="openai" placeholder="openai" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="custom-lm-email-type">邮箱类型</label>
-                            <input type="text" id="custom-lm-email-type" name="lm_email_type" value="ms_graph" placeholder="ms_graph">
+                            <input type="text" id="custom-lm-email-type" name="lm_email_type" value="ms_graph" placeholder="ms_graph" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="custom-lm-preferred-domain">优先域名 (可选)</label>
-                            <input type="text" id="custom-lm-preferred-domain" name="lm_preferred_domain" placeholder="outlook.com">
+                            <input type="text" id="custom-lm-preferred-domain" name="lm_preferred_domain" placeholder="outlook.com" autocomplete="off">
                         </div>
                     </div>
                     <!-- Freemail 字段 -->
                     <div id="add-freemail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="custom-fm-base-url">Worker 地址</label>
-                            <input type="text" id="custom-fm-base-url" name="fm_base_url" placeholder="https://freemail.example.com">
+                            <input type="text" id="custom-fm-base-url" name="fm_base_url" placeholder="https://freemail.example.com" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="custom-fm-admin-token">Admin Token</label>
-                            <input type="password" id="custom-fm-admin-token" name="fm_admin_token" placeholder="JWT_TOKEN 值">
+                            <input type="password" id="custom-fm-admin-token" name="fm_admin_token" placeholder="JWT_TOKEN 值" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="custom-fm-domain">邮箱域名 (可选)</label>
-                            <input type="text" id="custom-fm-domain" name="fm_domain" placeholder="example.com">
+                            <input type="text" id="custom-fm-domain" name="fm_domain" placeholder="example.com" autocomplete="off">
                         </div>
                     </div>
                     <!-- IMAP 字段 -->
                     <div id="add-imap-fields" style="display:none;">
                         <div class="form-group">
                             <label for="custom-imap-host">IMAP 服务器</label>
-                            <input type="text" id="custom-imap-host" name="imap_host" placeholder="imap.gmail.com / imap.qq.com / imap.163.com">
+                            <input type="text" id="custom-imap-host" name="imap_host" placeholder="imap.gmail.com / imap.qq.com / imap.163.com" autocomplete="off">
                             <small style="color: var(--text-muted);">Gmail: imap.gmail.com | QQ: imap.qq.com | 163: imap.163.com</small>
                         </div>
                         <div class="form-row">
@@ -399,36 +399,36 @@
                         </div>
                         <div class="form-group">
                             <label for="custom-imap-email">邮箱地址</label>
-                            <input type="email" id="custom-imap-email" name="imap_email" placeholder="your@gmail.com">
+                            <input type="email" id="custom-imap-email" name="imap_email" placeholder="your@gmail.com" autocomplete="email">
                         </div>
                         <div class="form-group">
                             <label for="custom-imap-password">密码 / 授权码</label>
-                            <input type="password" id="custom-imap-password" name="imap_password" placeholder="Gmail 需使用 App Password，QQ/163 需使用授权码">
+                            <input type="password" id="custom-imap-password" name="imap_password" placeholder="Gmail 需使用 App Password，QQ/163 需使用授权码" autocomplete="current-password">
                         </div>
                     </div>
                     <!-- CloudMail 字段 -->
                     <div id="add-cloudmail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="custom-cm-base-url">API 地址</label>
-                            <input type="text" id="custom-cm-base-url" name="cm_base_url" placeholder="https://mail.example.com">
+                            <input type="text" id="custom-cm-base-url" name="cm_base_url" placeholder="https://mail.example.com" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="custom-cm-admin-password">管理员密码</label>
-                            <input type="password" id="custom-cm-admin-password" name="cm_admin_password" placeholder="管理员邮箱密码">
+                            <input type="password" id="custom-cm-admin-password" name="cm_admin_password" placeholder="管理员邮箱密码" autocomplete="current-password">
                         </div>
                         <div class="form-group">
                             <label for="custom-cm-admin-email">管理员邮箱（可选）</label>
-                            <input type="email" id="custom-cm-admin-email" name="cm_admin_email" placeholder="admin@example.com">
+                            <input type="email" id="custom-cm-admin-email" name="cm_admin_email" placeholder="admin@example.com" autocomplete="email">
                             <small style="color: var(--text-muted);">留空则自动使用 admin@域名</small>
                         </div>
                         <div class="form-group">
                             <label for="custom-cm-domain">邮箱域名（可选）</label>
-                            <input type="text" id="custom-cm-domain" name="cm_domain" placeholder="example.com 或 domain1.com,domain2.com">
+                            <input type="text" id="custom-cm-domain" name="cm_domain" placeholder="example.com 或 domain1.com,domain2.com" autocomplete="off">
                             <small style="color: var(--text-muted);">支持多个域名，用英文逗号分隔。留空则从 API 地址提取</small>
                         </div>
                         <div class="form-group">
                             <label for="custom-cm-subdomain">子域（可选）</label>
-                            <input type="text" id="custom-cm-subdomain" name="cm_subdomain" placeholder="test">
+                            <input type="text" id="custom-cm-subdomain" name="cm_subdomain" placeholder="test" autocomplete="off">
                             <small style="color: var(--text-muted);">例如填写 "test"，生成的邮箱为 xxx@test.example.com</small>
                         </div>
                     </div>
@@ -467,7 +467,7 @@
                     <input type="hidden" id="edit-custom-sub-type-hidden" name="sub_type">
                     <div class="form-group">
                         <label for="edit-custom-name">服务名称</label>
-                        <input type="text" id="edit-custom-name" name="name" required placeholder="例如：我的域名邮箱">
+                        <input type="text" id="edit-custom-name" name="name" required placeholder="例如：我的域名邮箱" autocomplete="off">
                     </div>
                     <div class="form-group">
                         <label>服务类型</label>
@@ -477,23 +477,23 @@
                     <div id="edit-moemail-fields">
                         <div class="form-group">
                             <label for="edit-custom-api-url">API 地址</label>
-                            <input type="text" id="edit-custom-api-url" name="api_url" placeholder="https://api.example.com">
+                            <input type="text" id="edit-custom-api-url" name="api_url" placeholder="https://api.example.com" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="edit-custom-api-key">API 密钥</label>
-                            <input type="text" id="edit-custom-api-key" name="api_key" placeholder="API Key">
+                            <input type="text" id="edit-custom-api-key" name="api_key" placeholder="API Key" autocomplete="off">
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-custom-domain">邮箱域名</label>
-                            <input type="text" id="edit-custom-domain" name="domain" placeholder="example.com">
+                            <input type="text" id="edit-custom-domain" name="domain" placeholder="example.com" autocomplete="off">
                         </div>
                     </div>
                     <!-- Tempmail.lol 字段 -->
                     <div id="edit-tempmail-builtin-fields" style="display:none;">
                         <div class="form-group">
                             <label for="edit-tpo-base-url">API 地址</label>
-                            <input type="text" id="edit-tpo-base-url" name="tpo_base_url" placeholder="https://api.tempmail.lol/v2">
+                            <input type="text" id="edit-tpo-base-url" name="tpo_base_url" placeholder="https://api.tempmail.lol/v2" autocomplete="url">
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -510,16 +510,16 @@
                     <div id="edit-yyds-fields" style="display:none;">
                         <div class="form-group">
                             <label for="edit-yyds-base-url">API 地址</label>
-                            <input type="text" id="edit-yyds-base-url" name="yyds_base_url" placeholder="https://maliapi.215.im/v1">
+                            <input type="text" id="edit-yyds-base-url" name="yyds_base_url" placeholder="https://maliapi.215.im/v1" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="edit-yyds-api-key">API Key</label>
-                            <input type="text" id="edit-yyds-api-key" name="yyds_api_key" placeholder="留空则不修改">
+                            <input type="text" id="edit-yyds-api-key" name="yyds_api_key" placeholder="留空则不修改" autocomplete="off">
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-yyds-default-domain">默认域名（可选）</label>
-                            <input type="text" id="edit-yyds-default-domain" name="yyds_default_domain" placeholder="public.example.com">
+                            <input type="text" id="edit-yyds-default-domain" name="yyds_default_domain" placeholder="public.example.com" autocomplete="off">
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -536,32 +536,32 @@
                     <div id="edit-tempmail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="edit-tm-base-url">Worker 地址</label>
-                            <input type="text" id="edit-tm-base-url" name="tm_base_url" placeholder="https://mail.example.com">
+                            <input type="text" id="edit-tm-base-url" name="tm_base_url" placeholder="https://mail.example.com" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="edit-tm-admin-password">Admin 密码</label>
-                            <input type="password" id="edit-tm-admin-password" name="tm_admin_password" placeholder="留空则不修改">
+                            <input type="password" id="edit-tm-admin-password" name="tm_admin_password" placeholder="留空则不修改" autocomplete="current-password">
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-tm-domain">邮箱域名</label>
-                            <input type="text" id="edit-tm-domain" name="tm_domain" placeholder="example.com">
+                            <input type="text" id="edit-tm-domain" name="tm_domain" placeholder="example.com" autocomplete="off">
                         </div>
                     </div>
                     <!-- DuckMail 字段 -->
                     <div id="edit-duckmail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="edit-dm-base-url">API 地址</label>
-                            <input type="text" id="edit-dm-base-url" name="dm_base_url" placeholder="https://api.duckmail.sbs">
+                            <input type="text" id="edit-dm-base-url" name="dm_base_url" placeholder="https://api.duckmail.sbs" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="edit-dm-api-key">API Key</label>
-                            <input type="text" id="edit-dm-api-key" name="dm_api_key" placeholder="留空则不修改">
+                            <input type="text" id="edit-dm-api-key" name="dm_api_key" placeholder="留空则不修改" autocomplete="off">
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-dm-domain">默认域名</label>
-                            <input type="text" id="edit-dm-domain" name="dm_domain" placeholder="example.com">
+                            <input type="text" id="edit-dm-domain" name="dm_domain" placeholder="example.com" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="edit-dm-password-length">随机密码长度</label>
@@ -572,47 +572,47 @@
                     <div id="edit-luckmail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="edit-lm-base-url">平台地址</label>
-                            <input type="text" id="edit-lm-base-url" name="lm_base_url" placeholder="https://mails.luckyous.com/">
+                            <input type="text" id="edit-lm-base-url" name="lm_base_url" placeholder="https://mails.luckyous.com/" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="edit-lm-api-key">API Key</label>
-                            <input type="text" id="edit-lm-api-key" name="lm_api_key" placeholder="留空则不修改">
+                            <input type="text" id="edit-lm-api-key" name="lm_api_key" placeholder="留空则不修改" autocomplete="off">
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-lm-project-code">项目编码</label>
-                            <input type="text" id="edit-lm-project-code" name="lm_project_code" placeholder="openai">
+                            <input type="text" id="edit-lm-project-code" name="lm_project_code" placeholder="openai" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="edit-lm-email-type">邮箱类型</label>
-                            <input type="text" id="edit-lm-email-type" name="lm_email_type" placeholder="ms_graph">
+                            <input type="text" id="edit-lm-email-type" name="lm_email_type" placeholder="ms_graph" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label for="edit-lm-preferred-domain">优先域名 (可选)</label>
-                            <input type="text" id="edit-lm-preferred-domain" name="lm_preferred_domain" placeholder="outlook.com">
+                            <input type="text" id="edit-lm-preferred-domain" name="lm_preferred_domain" placeholder="outlook.com" autocomplete="off">
                         </div>
                     </div>
                     <!-- Freemail 字段 -->
                     <div id="edit-freemail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="edit-fm-base-url">Worker 地址</label>
-                            <input type="text" id="edit-fm-base-url" name="fm_base_url" placeholder="https://freemail.example.com">
+                            <input type="text" id="edit-fm-base-url" name="fm_base_url" placeholder="https://freemail.example.com" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="edit-fm-admin-token">Admin Token</label>
-                            <input type="password" id="edit-fm-admin-token" name="fm_admin_token" placeholder="留空则不修改">
+                            <input type="password" id="edit-fm-admin-token" name="fm_admin_token" placeholder="留空则不修改" autocomplete="off">
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-fm-domain">邮箱域名 (可选)</label>
-                            <input type="text" id="edit-fm-domain" name="fm_domain" placeholder="example.com">
+                            <input type="text" id="edit-fm-domain" name="fm_domain" placeholder="example.com" autocomplete="off">
                         </div>
                     </div>
                     <!-- IMAP 字段 -->
                     <div id="edit-imap-fields" style="display:none;">
                         <div class="form-group">
                             <label for="edit-imap-host">IMAP 服务器</label>
-                            <input type="text" id="edit-imap-host" name="imap_host" placeholder="imap.gmail.com">
+                            <input type="text" id="edit-imap-host" name="imap_host" placeholder="imap.gmail.com" autocomplete="off">
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -629,11 +629,11 @@
                         </div>
                         <div class="form-group">
                             <label for="edit-imap-email">邮箱地址</label>
-                            <input type="email" id="edit-imap-email" name="imap_email" placeholder="your@gmail.com">
+                            <input type="email" id="edit-imap-email" name="imap_email" placeholder="your@gmail.com" autocomplete="email">
                         </div>
                         <div class="form-group">
                             <label for="edit-imap-password">密码 / 授权码</label>
-                            <input type="password" id="edit-imap-password" name="imap_password" placeholder="留空则保持原值不变">
+                            <input type="password" id="edit-imap-password" name="imap_password" placeholder="留空则保持原值不变" autocomplete="current-password">
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                     </div>
@@ -641,26 +641,26 @@
                     <div id="edit-cloudmail-fields" style="display:none;">
                         <div class="form-group">
                             <label for="edit-cm-base-url">API 地址</label>
-                            <input type="text" id="edit-cm-base-url" name="cm_base_url" placeholder="https://mail.example.com">
+                            <input type="text" id="edit-cm-base-url" name="cm_base_url" placeholder="https://mail.example.com" autocomplete="url">
                         </div>
                         <div class="form-group">
                             <label for="edit-cm-admin-password">管理员密码</label>
-                            <input type="password" id="edit-cm-admin-password" name="cm_admin_password" placeholder="留空则不修改">
+                            <input type="password" id="edit-cm-admin-password" name="cm_admin_password" placeholder="留空则不修改" autocomplete="current-password">
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-cm-admin-email">管理员邮箱（可选）</label>
-                            <input type="email" id="edit-cm-admin-email" name="cm_admin_email" placeholder="admin@example.com">
+                            <input type="email" id="edit-cm-admin-email" name="cm_admin_email" placeholder="admin@example.com" autocomplete="email">
                             <small style="color: var(--text-muted);">留空则自动使用 admin@域名</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-cm-domain">邮箱域名（可选）</label>
-                            <input type="text" id="edit-cm-domain" name="cm_domain" placeholder="example.com">
+                            <input type="text" id="edit-cm-domain" name="cm_domain" placeholder="example.com" autocomplete="off">
                             <small style="color: var(--text-muted);">支持多个域名，用英文逗号分隔。留空则从 API 地址提取</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-cm-subdomain">子域（可选）</label>
-                            <input type="text" id="edit-cm-subdomain" name="cm_subdomain" placeholder="test">
+                            <input type="text" id="edit-cm-subdomain" name="cm_subdomain" placeholder="test" autocomplete="off">
                             <small style="color: var(--text-muted);">例如填写 "test"，生成的邮箱为 xxx@test.example.com</small>
                         </div>
                     </div>
@@ -697,20 +697,20 @@
                     <input type="hidden" id="edit-outlook-id" name="id">
                     <div class="form-group">
                         <label for="edit-outlook-email">邮箱地址</label>
-                        <input type="text" id="edit-outlook-email" name="email" required placeholder="example@outlook.com">
+                        <input type="text" id="edit-outlook-email" name="email" required placeholder="example@outlook.com" autocomplete="email">
                     </div>
                     <div class="form-group">
                         <label for="edit-outlook-password">密码</label>
-                        <input type="password" id="edit-outlook-password" name="password" placeholder="留空则保持原值不变">
+                        <input type="password" id="edit-outlook-password" name="password" placeholder="留空则保持原值不变" autocomplete="current-password">
                         <small style="color: var(--text-muted);">留空则保持原值不变</small>
                     </div>
                     <div class="form-group">
                         <label for="edit-outlook-client-id">OAuth Client ID (可选)</label>
-                        <input type="text" id="edit-outlook-client-id" name="client_id" placeholder="用于 XOAUTH2 认证">
+                        <input type="text" id="edit-outlook-client-id" name="client_id" placeholder="用于 XOAUTH2 认证" autocomplete="off">
                     </div>
                     <div class="form-group">
                         <label for="edit-outlook-refresh-token">OAuth Refresh Token (可选)</label>
-                        <input type="text" id="edit-outlook-refresh-token" name="refresh_token" placeholder="留空则保持原值不变">
+                        <input type="text" id="edit-outlook-refresh-token" name="refresh_token" placeholder="留空则保持原值不变" autocomplete="off">
                         <small style="color: var(--text-muted);">留空则保持原值不变</small>
                     </div>
                     <div class="form-row">

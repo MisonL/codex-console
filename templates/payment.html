@@ -437,13 +437,13 @@
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link active">支付</a>
                 <a href="/card-pool" class="nav-link">卡池</a>
-                <a href="/auto-team" class="nav-link">team</a>
+                <a href="/auto-team" class="nav-link">Team 管理</a>
                 <a href="/logs" class="nav-link">后台日志</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">系统自检</a>
             <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
         </div>
         </nav>
@@ -511,7 +511,7 @@
                                 <small class="hint">选择国家后会自动联动默认货币，可手动调整</small>
                             </div>
                             <div class="form-group">
-                                <label>对应货币</label>
+                                <label for="currency-display">对应货币</label>
                                 <select id="currency-display">
                                     <option value="USD">USD</option>
                                     <option value="EUR">EUR</option>
@@ -534,7 +534,7 @@
                             <div class="form-row">
                                 <div class="form-group">
                                     <label for="workspace-name">工作区名称</label>
-                                    <input type="text" id="workspace-name" value="MyTeam" placeholder="MyTeam">
+                                    <input type="text" id="workspace-name" value="MyTeam" placeholder="MyTeam" autocomplete="organization">
                                 </div>
                                 <div class="form-group">
                                     <label for="seat-quantity">座位数量</label>
@@ -569,7 +569,7 @@
                                     <div class="form-row">
                                         <div class="form-group">
                                             <label for="third-party-api-url">第三方 API 地址</label>
-                                            <input id="third-party-api-url" type="text" placeholder="https://twilight-river-f148.482091502.workers.dev/">
+                                            <input id="third-party-api-url" type="text" placeholder="https://twilight-river-f148.482091502.workers.dev/" autocomplete="url">
                                         </div>
                                         <div class="form-group">
                                             <label for="third-party-api-key">第三方 API Key（可选）</label>
@@ -587,7 +587,7 @@
                                     <div class="form-row">
                                         <div class="form-group">
                                             <label for="vendor-checkout-input">自定义 Checkout（可选）</label>
-                                            <input id="vendor-checkout-input" type="text" placeholder="留空则按账号套餐自动生成官方 Checkout">
+                                            <input id="vendor-checkout-input" type="text" placeholder="留空则按账号套餐自动生成官方 Checkout" autocomplete="url">
                                         </div>
                                         <div class="form-group">
                                             <label for="vendor-redeem-input">兑换码（必填）</label>
@@ -603,7 +603,7 @@
                                     <div class="form-row">
                                         <div class="form-group">
                                             <label for="efun-base-url-input">卡商接口地址（可选）</label>
-                                            <input id="efun-base-url-input" type="text" placeholder="https://card.aimizy.com/api/v1/bindcard">
+                                            <input id="efun-base-url-input" type="text" placeholder="https://card.aimizy.com/api/v1/bindcard" autocomplete="url">
                                         </div>
                                         <div class="form-group">
                                             <label for="efun-api-key-input">卡商 API Key（可选）</label>
@@ -641,7 +641,7 @@ CVV: 123
 4242 4242 4242 4242
 12/30
 CVV 123
-38 Pearl Avenue, Louisville, MS 39339, US"></textarea>
+38 Pearl Avenue, Louisville, MS 39339, US" autocomplete="off"></textarea>
                             </div>
                             <div class="form-actions bind-parse-actions">
                                 <button id="parse-billing-btn" type="button" class="btn btn-success">识别并填充</button>
@@ -677,26 +677,26 @@ CVV 123
                                 <div class="form-row bind-card-inline-row">
                                     <div class="form-group bind-card-col-number">
                                         <label for="card-number-input">卡号</label>
-                                        <input id="card-number-input" type="text" autocomplete="off" placeholder="4242 4242 4242 4242">
+                                        <input id="card-number-input" type="text" autocomplete="cc-number" placeholder="4242 4242 4242 4242">
                                     </div>
                                     <div class="form-group">
                                         <label for="card-expiry-input">有效期</label>
-                                        <input id="card-expiry-input" type="text" autocomplete="off" placeholder="02/30" maxlength="7">
+                                        <input id="card-expiry-input" type="text" autocomplete="cc-exp" placeholder="02/30" maxlength="7">
                                     </div>
                                     <div class="form-group">
                                         <label for="card-cvc-input">CVC</label>
-                                        <input id="card-cvc-input" type="text" autocomplete="off" placeholder="123" maxlength="4">
+                                        <input id="card-cvc-input" type="text" autocomplete="cc-csc" placeholder="123" maxlength="4">
                                     </div>
                                 </div>
 
                                 <div class="form-row">
                                     <div class="form-group">
                                         <label for="billing-name-input">姓名</label>
-                                        <input id="billing-name-input" type="text" autocomplete="off" placeholder="John Smith">
+                                        <input id="billing-name-input" type="text" autocomplete="cc-name" placeholder="John Smith">
                                     </div>
                                     <div class="form-group">
                                         <label for="billing-country-input">国家</label>
-                                        <select id="billing-country-input">
+                                        <select id="billing-country-input" autocomplete="country-name">
                                             <option value="US">US</option>
                                             <option value="GB">GB</option>
                                             <option value="CA">CA</option>
@@ -724,19 +724,19 @@ CVV 123
                                 <div class="form-row">
                                     <div class="form-group">
                                         <label for="billing-line1-input">地址</label>
-                                        <input id="billing-line1-input" type="text" autocomplete="off" placeholder="123 Main Street">
+                                        <input id="billing-line1-input" type="text" autocomplete="address-line1" placeholder="123 Main Street">
                                     </div>
                                     <div class="form-group">
                                         <label for="billing-city-input">城市</label>
-                                        <input id="billing-city-input" type="text" autocomplete="off" placeholder="San Francisco">
+                                        <input id="billing-city-input" type="text" autocomplete="address-level2" placeholder="San Francisco">
                                     </div>
                                     <div class="form-group">
                                         <label for="billing-state-input">州/省</label>
-                                        <input id="billing-state-input" type="text" autocomplete="off" placeholder="CA">
+                                        <input id="billing-state-input" type="text" autocomplete="address-level1" placeholder="CA">
                                     </div>
                                     <div class="form-group">
                                         <label for="billing-postal-input">邮编</label>
-                                        <input id="billing-postal-input" type="text" autocomplete="off" placeholder="94102">
+                                        <input id="billing-postal-input" type="text" autocomplete="postal-code" placeholder="94102">
                                     </div>
                                 </div>
                             </div>
@@ -769,8 +769,8 @@ CVV 123
 
                         <!-- 链接结果 -->
                         <div class="link-box" id="link-box">
-                            <label>支付链接</label>
-                            <textarea class="link-text" id="link-text" readonly></textarea>
+                            <label for="link-text">支付链接</label>
+                            <textarea class="link-text" id="link-text" readonly aria-label="支付链接" autocomplete="off"></textarea>
                             <div class="form-actions" style="margin-top:10px">
                                 <button class="btn btn-primary" onclick="openCheckout()">直接打开支付页</button>
                                 <button class="btn btn-secondary" onclick="copyLink()">复制链接</button>
@@ -790,8 +790,8 @@ CVV 123
                     <div class="card-body">
                         <div class="bind-task-toolbar">
                             <div class="bind-task-toolbar-left">
-                                <input id="bind-task-search" class="bind-task-search form-input" type="text" placeholder="搜索邮箱账号...">
-                                <select id="bind-task-status" class="bind-task-status form-select">
+                                <input id="bind-task-search" class="bind-task-search form-input" type="text" placeholder="搜索邮箱账号..." aria-label="搜索绑卡任务邮箱" autocomplete="search">
+                                <select id="bind-task-status" class="bind-task-status form-select" aria-label="绑卡任务状态筛选">
                                     <option value="">全部状态</option>
                                     <option value="link_ready">待打开</option>
                                     <option value="opened">已打开</option>
@@ -846,7 +846,5 @@ CVV 123
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
-
 
 

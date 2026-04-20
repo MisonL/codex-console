@@ -235,13 +235,13 @@
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/card-pool" class="nav-link active">卡池</a>
-                <a href="/auto-team" class="nav-link">team</a>
+                <a href="/auto-team" class="nav-link">Team 管理</a>
                 <a href="/logs" class="nav-link">后台日志</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">系统自检</a>
             <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
         </div>
         </nav>
@@ -286,15 +286,15 @@
                                 <button type="button" class="status-chip" data-status="used">已使用</button>
                                 <button type="button" class="status-chip" data-status="expired">已过期</button>
                             </div>
-                            <select id="supplier-filter" class="form-select card-pool-supplier-filter">
+                            <select id="supplier-filter" class="form-select card-pool-supplier-filter" aria-label="供应商筛选">
                                 <option value="">全部供应商</option>
                             </select>
-                            <select id="sort-order" class="form-select card-pool-sort-select">
+                            <select id="sort-order" class="form-select card-pool-sort-select" aria-label="卡池排序方式">
                                 <option value="created_desc">时间降序</option>
                                 <option value="created_asc">时间升序</option>
                             </select>
                             <div class="card-pool-search-group">
-                                <input id="redeem-search" type="text" class="form-input card-pool-search" placeholder="搜索">
+                                <input id="redeem-search" type="text" class="form-input card-pool-search" placeholder="搜索" aria-label="搜索兑换码" autocomplete="search">
                                 <button type="button" class="btn btn-secondary card-pool-search-btn" id="redeem-search-btn">搜索</button>
                             </div>
                         </div>
@@ -312,7 +312,7 @@
                             <table class="data-table">
                                 <thead>
                                     <tr>
-                                        <th style="width: 40px;"><input type="checkbox" id="select-all-codes"></th>
+                                        <th style="width: 40px;"><input type="checkbox" id="select-all-codes" aria-label="全选兑换码"></th>
                                         <th>兑换码</th>
                                         <th style="width: 140px;">供应商</th>
                                         <th style="width: 100px;">状态</th>
@@ -333,7 +333,7 @@
                         <div class="pagination card-pool-pagination">
                             <div class="per-page">
                                 每页
-                                <select id="page-size" class="form-select">
+                                <select id="page-size" class="form-select" aria-label="每页条数">
                                     <option value="20">20</option>
                                     <option value="50" selected>50</option>
                                     <option value="100">100</option>
@@ -376,7 +376,7 @@
                     <label for="import-codes-input">兑换码列表</label>
                     <textarea id="import-codes-input" class="form-input" rows="8" placeholder="每行一个或使用空格/逗号分隔，例如：
 UK-UVYUD-J7BMB-5PZFE-Z8V5G-4Y5FJ
-UK-ABCDE-12345-FGHIJ-67890-KLMNO"></textarea>
+UK-ABCDE-12345-FGHIJ-67890-KLMNO" autocomplete="off"></textarea>
                     <div class="import-help">支持换行、空格、英文逗号、中文逗号分隔，自动去重。</div>
                 </div>
                 <div class="form-group">
@@ -400,11 +400,11 @@ UK-ABCDE-12345-FGHIJ-67890-KLMNO"></textarea>
             <div class="modal-body">
                 <div class="form-group">
                     <label for="edit-code-display">兑换码</label>
-                    <input id="edit-code-display" class="form-input" type="text" readonly>
+                    <input id="edit-code-display" class="form-input" type="text" readonly autocomplete="off">
                 </div>
                 <div class="form-group">
                     <label for="edit-supplier-input">供应商（可选）</label>
-                    <input id="edit-supplier-input" class="form-input" type="text" list="supplier-options" placeholder="例如 A供应商">
+                    <input id="edit-supplier-input" class="form-input" type="text" list="supplier-options" placeholder="例如 A供应商" autocomplete="off">
                 </div>
                 <div class="form-group">
                     <label for="edit-status-select">状态</label>
@@ -416,7 +416,7 @@ UK-ABCDE-12345-FGHIJ-67890-KLMNO"></textarea>
                 </div>
                 <div class="form-group">
                     <label for="edit-used-email">使用者邮箱（可选）</label>
-                    <input id="edit-used-email" class="form-input" type="text" placeholder="例如 user@example.com">
+                    <input id="edit-used-email" class="form-input" type="text" placeholder="例如 user@example.com" autocomplete="email">
                 </div>
                 <div class="form-group">
                     <label for="edit-expires-at">过期时间（可选）</label>
@@ -437,6 +437,3 @@ UK-ABCDE-12345-FGHIJ-67890-KLMNO"></textarea>
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
-
-

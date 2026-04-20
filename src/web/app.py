@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -38,6 +38,7 @@ else:
 
 STATIC_DIR = _RESOURCE_ROOT / "static"
 TEMPLATES_DIR = _RESOURCE_ROOT / "templates"
+FAVICON_PATH = STATIC_DIR / "favicon.svg"
 
 
 def _build_static_asset_version(static_dir: Path) -> str:
@@ -106,8 +107,12 @@ def create_app() -> FastAPI:
         app.state.log_cleanup_task = asyncio.create_task(periodic_log_cleanup())
         await scheduled_registration_service.start()
         app.state.scheduled_registration_service = scheduled_registration_service
-        app.state.auto_quick_refresh_task = asyncio.create_task(auto_quick_refresh_scheduler.run_loop())
-        app.state.selfcheck_scheduler_task = asyncio.create_task(selfcheck_scheduler.run_loop())
+        app.state.auto_quick_refresh_task = asyncio.create_task(
+            auto_quick_refresh_scheduler.run_loop()
+        )
+        app.state.selfcheck_scheduler_task = asyncio.create_task(
+            selfcheck_scheduler.run_loop()
+        )
 
         logger.info("=" * 50)
         logger.info("%s v%s starting", settings.app_name, settings.app_version)
@@ -124,15 +129,21 @@ def create_app() -> FastAPI:
             if cleanup_task:
                 cleanup_task.cancel()
 
-            scheduler_service = getattr(app.state, "scheduled_registration_service", None)
+            scheduler_service = getattr(
+                app.state, "scheduled_registration_service", None
+            )
             if scheduler_service:
                 await scheduler_service.stop()
 
-            auto_quick_refresh_task = getattr(app.state, "auto_quick_refresh_task", None)
+            auto_quick_refresh_task = getattr(
+                app.state, "auto_quick_refresh_task", None
+            )
             if auto_quick_refresh_task:
                 auto_quick_refresh_task.cancel()
 
-            selfcheck_scheduler_task = getattr(app.state, "selfcheck_scheduler_task", None)
+            selfcheck_scheduler_task = getattr(
+                app.state, "selfcheck_scheduler_task", None
+            )
             if selfcheck_scheduler_task:
                 selfcheck_scheduler_task.cancel()
 
@@ -171,7 +182,9 @@ def create_app() -> FastAPI:
     if not TEMPLATES_DIR.exists():
         TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
-    app.include_router(api_router, prefix="/api", dependencies=[Depends(require_api_auth)])
+    app.include_router(
+        api_router, prefix="/api", dependencies=[Depends(require_api_auth)]
+    )
     app.include_router(ws_router, prefix="/api")
 
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -196,7 +209,9 @@ def create_app() -> FastAPI:
                 status_code=status_code,
             )
         except TypeError:
-            return templates.TemplateResponse(name, template_context, status_code=status_code)
+            return templates.TemplateResponse(
+                name, template_context, status_code=status_code
+            )
 
     def _guard_page_request(request: Request) -> Optional[RedirectResponse]:
         if is_default_security_config_active():
@@ -206,7 +221,9 @@ def create_app() -> FastAPI:
         return None
 
     @app.get("/login", response_class=HTMLResponse)
-    async def login_page(request: Request, next: Optional[str] = "/", notice: Optional[str] = ""):
+    async def login_page(
+        request: Request, next: Optional[str] = "/", notice: Optional[str] = ""
+    ):
         if is_default_security_config_active():
             return build_setup_password_redirect()
         return _render_template(
@@ -215,8 +232,16 @@ def create_app() -> FastAPI:
             {"error": "", "next": next or "/", "notice": notice or ""},
         )
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        if FAVICON_PATH.exists():
+            return FileResponse(FAVICON_PATH, media_type="image/svg+xml")
+        return RedirectResponse(url="/static/favicon.svg", status_code=307)
+
     @app.post("/login")
-    async def login_submit(request: Request, password: str = Form(...), next: Optional[str] = "/"):
+    async def login_submit(
+        request: Request, password: str = Form(...), next: Optional[str] = "/"
+    ):
         if is_default_security_config_active():
             return build_setup_password_redirect()
 

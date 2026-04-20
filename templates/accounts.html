@@ -427,13 +427,13 @@
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/card-pool" class="nav-link">卡池</a>
-                <a href="/auto-team" class="nav-link">team</a>
+                <a href="/auto-team" class="nav-link">Team 管理</a>
                 <a href="/logs" class="nav-link">后台日志</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">系统自检</a>
             <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
         </div>
         </nav>
@@ -477,7 +477,7 @@
             <div class="card toolbar-card">
                 <div class="card-body toolbar">
                     <div class="toolbar-left">
-                        <select id="filter-status" class="form-select">
+                        <select id="filter-status" class="form-select" aria-label="账号状态筛选">
                             <option value="">全部状态</option>
                             <option value="active">活跃</option>
                             <option value="expired">过期</option>
@@ -485,21 +485,21 @@
                             <option value="failed">失败</option>
                         </select>
 
-                        <select id="filter-service" class="form-select">
+                        <select id="filter-service" class="form-select" aria-label="邮箱服务筛选">
                             <option value="">全部邮箱服务</option>
                             <option value="tempmail">Tempmail</option>
                             <option value="outlook">Outlook</option>
                             <option value="moe_mail">MoeMail</option>
                         </select>
 
-                        <select id="filter-role-tag" class="form-select">
+                        <select id="filter-role-tag" class="form-select" aria-label="账号标号筛选">
                             <option value="">全部标号</option>
                             <option value="parent">母号</option>
                             <option value="child">子号</option>
                             <option value="none">普通</option>
                         </select>
 
-                        <input type="text" id="search-input" class="form-input" placeholder="搜索邮箱..." style="min-width: 200px;">
+                        <input type="text" id="search-input" class="form-input" placeholder="搜索邮箱..." style="min-width: 200px;" aria-label="搜索账号邮箱" autocomplete="search">
                     </div>
 
                     <div class="toolbar-right">
@@ -584,7 +584,7 @@
                         <table class="data-table">
                             <thead>
                                 <tr>
-                                    <th style="width: 40px;"><input type="checkbox" id="select-all"></th>
+                                    <th style="width: 40px;"><input type="checkbox" id="select-all" aria-label="全选账号"></th>
                                     <th style="width: 60px;">ID</th>
                                     <th>邮箱</th>
                                     <th style="width: 100px;">密码</th>
@@ -806,7 +806,7 @@
                         </label>
                     </div>
                     <div class="form-group">
-                        <label>执行间隔</label>
+                        <label for="auto-quick-refresh-interval">执行间隔</label>
                         <select id="auto-quick-refresh-interval" class="form-select">
                             <option value="5">每 5 分钟</option>
                             <option value="10">每 10 分钟</option>
@@ -817,7 +817,7 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>失败重试</label>
+                        <label for="auto-quick-refresh-retry">失败重试</label>
                         <select id="auto-quick-refresh-retry" class="form-select">
                             <option value="0">0 次</option>
                             <option value="1">1 次</option>

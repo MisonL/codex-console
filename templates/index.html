@@ -337,13 +337,13 @@
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/card-pool" class="nav-link">卡池</a>
-                <a href="/auto-team" class="nav-link">team</a>
+                <a href="/auto-team" class="nav-link">Team 管理</a>
                 <a href="/logs" class="nav-link">后台日志</a>
                 <a href="/settings" class="nav-link">设置</a>
                 <a href="/logout" class="nav-link">退出</a>
             </div>
                         <div class="nav-actions">
-            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">Check</a>
+            <a href="/selfcheck" class="selfcheck-toggle" title="系统自检">系统自检</a>
             <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">Theme</button>
         </div>
         </nav>
@@ -566,7 +566,7 @@
                                         </div>
                                         <div class="form-group">
                                             <label for="auto-registration-proxy">固定代理（可选）</label>
-                                            <input type="text" id="auto-registration-proxy" placeholder="留空则沿用现有代理策略">
+                                            <input type="text" id="auto-registration-proxy" placeholder="留空则沿用现有代理策略" autocomplete="url">
                                         </div>
                                     </div>
 
@@ -657,7 +657,7 @@
                                 <div class="schedule-form-grid">
                                     <div class="form-group full-width">
                                         <label for="schedule-name">计划名称</label>
-                                        <input type="text" id="schedule-name" maxlength="100" placeholder="例如：每 3 天定时注册并上传">
+                                        <input type="text" id="schedule-name" maxlength="100" placeholder="例如：每 3 天定时注册并上传" autocomplete="off">
                                     </div>
 
                                     <div class="form-group">
@@ -851,5 +851,3 @@
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
-
